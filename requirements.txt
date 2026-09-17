@@ -6,3 +6,4 @@ asyncio
 aiohttp
 opencv-python-headless
 Pillow
+python-dateutil
