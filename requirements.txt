@@ -3,4 +3,6 @@ tgcrypto
 motor
 dnspython
 asyncio
-hachoir
+aiohttp
+opencv-python-headless
+Pillow
