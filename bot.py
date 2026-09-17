@@ -1,5 +1,12 @@
-import os
 import asyncio
+
+# ================= Python 3.10+ Pyrogram Crash Fix =================
+# Pyrogram ইম্পোর্ট করার আগেই Event loop তৈরি করতে হবে, তা না হলে Render-এ ক্র্যাশ করবে।
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+# ===================================================================
+
+import os
 import cv2
 from PIL import Image
 from aiohttp import web
@@ -237,7 +244,7 @@ async def start_web_server():
 # ================= মেইন ফাংশন =================
 async def main():
     await app.start()
-    print("✅ Telegram Bot Started!")
+    print("✅ Telegram Bot Started Successfully!")
     
     # Render-কে খুশি রাখতে ওয়েব সার্ভার রান করানো
     await start_web_server()
@@ -247,5 +254,5 @@ async def main():
     await app.stop()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
+    # উপরে তৈরি করা loop এখানে ব্যবহার করা হচ্ছে
     loop.run_until_complete(main())
