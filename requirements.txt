@@ -1,8 +1,8 @@
 pyrogram
 tgcrypto
 motor
+pymongo
 dnspython
-asyncio
 aiohttp
 opencv-python-headless
 Pillow
