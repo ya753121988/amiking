@@ -17,16 +17,18 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.errors import UserNotParticipant
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# ================= কনফিগারেশন (Environment Variables) =================
-# এগুলো Render/Koyeb এর Environment Variables এ সেট করতে হবে
-API_ID = int(os.environ.get("API_ID", "29904834"))
-API_HASH = os.environ.get("API_HASH", "আপনার_API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "আপনার_BOT_TOKEN")
-MONGO_URI = os.environ.get("MONGO_URI", "আপনার_MONGODB_URL")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "7120801813"))
-FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "-1003309004720") 
-SITE_URL = os.environ.get("SITE_URL", "https://amiking-site.vercel.app") 
-PORT = int(os.environ.get("PORT", 8080)) # Koyeb/Render এর জন্য পোর্ট
+# ================= আপনার অরিজিনাল কনফিগারেশন =================
+API_ID = 29904834
+API_HASH = "8b4fd9ef578af114502feeafa2d31938"
+BOT_TOKEN = "8206083172:AAHP9raleY3l2R2HBTGSVCdpcLQvgn960Mw"
+MONGO_URI = "mongodb+srv://akash:akash@cluster0.etisrpx.mongodb.net/?appName=Cluster0"
+ADMIN_ID = 7120801813
+FSUB_CHANNEL = "-1003309004720"
+SITE_URL = "https://amiking-site.vercel.app" 
+RENDER_URL = "https://amiking.onrender.com"
+
+# Render পোর্ট অটোমেটিক নেবে, না পেলে 10000 ব্যবহার করবে
+PORT = int(os.environ.get("PORT", 10000))
 
 # ================= ডাটাবেস সেটআপ =================
 mongo_client = AsyncIOMotorClient(MONGO_URI)
@@ -223,9 +225,9 @@ async def daily_spin(client, message: Message):
     await users_db.update_one({"user_id": user_id}, {"$inc": {"coins": won_coin}, "$set": {"last_spin": datetime.now()}})
     await message.reply_text(f"🎰 স্পিন ঘুরছে...\n\n🎉 অভিনন্দন! আপনি **{won_coin} Coins** জিতেছেন!")
 
-# ================= Render/Koyeb ক্র্যাশ ফিক্স (Dummy Web Server) =================
+# ================= Render ক্র্যাশ ফিক্স (Dummy Web Server) =================
 async def handle_request(request):
-    return web.Response(text="Bot is Running Successfully on Render/Koyeb!")
+    return web.Response(text="Bot is Running Successfully on Render!")
 
 async def start_web_server():
     web_app = web.Application()
@@ -234,16 +236,18 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✅ Web Server running on port {PORT}")
+    print(f"✅ Web Server started on port {PORT}")
 
 # ================= মেইন ফাংশন =================
 async def main():
-    print("Starting Bot...")
+    # ⚠️ পোর্ট এরর এড়াতে সবার আগে ওয়েব সার্ভার চালু করছি
+    print("Starting Web Server for Render...")
+    await start_web_server()
+    
+    # সার্ভার চালুর পর বট স্টার্ট হবে
+    print("Starting Telegram Bot...")
     await app.start()
     print("✅ Telegram Bot Started Successfully!")
-    
-    # Render/Koyeb এর জন্য ওয়েব সার্ভার চালু করা
-    await start_web_server()
     
     await idle()
     await app.stop()
