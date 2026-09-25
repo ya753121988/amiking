@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import threading
 import time
@@ -15,6 +16,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInf
 from flask import Flask, render_template_string, request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
+from pymongo.errors import ConfigurationError
 
 # ==========================================
 # 1. CONFIGURATION
@@ -29,15 +31,25 @@ WEB_URL = os.environ.get("WEB_URL", "https://amiking.onrender.com")
 # ==========================================
 # 2. DATABASE SETUP (Async & Sync)
 # ==========================================
-db_client = AsyncIOMotorClient(MONGO_URI)
-db = db_client["ShilaCallApp"]
-users_col, files_col, settings_col = db["users"], db["files"], db["settings"]
-cats_col, pkgs_col, coupons_col = db["categories"], db["packages"], db["coupons"]
+try:
+    # Adding timeout so it doesn't hang forever on bad connection
+    db_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    db = db_client["ShilaCallApp"]
+    users_col, files_col, settings_col = db["users"], db["files"], db["settings"]
+    cats_col, pkgs_col, coupons_col = db["categories"], db["packages"], db["coupons"]
 
-sync_client = MongoClient(MONGO_URI)
-sync_db = sync_client["ShilaCallApp"]
-sync_users, sync_files, sync_cats = sync_db["users"], sync_db["files"], sync_db["categories"]
-sync_pkgs, sync_coupons = sync_db["packages"], sync_db["coupons"]
+    sync_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    sync_db = sync_client["ShilaCallApp"]
+    sync_users, sync_files, sync_cats = sync_db["users"], sync_db["files"], sync_db["categories"]
+    sync_pkgs, sync_coupons = sync_db["packages"], sync_db["coupons"]
+except ConfigurationError as e:
+    print("\n❌ MongoDB Connection Error!")
+    print("আপনার MONGO_URI কাজ করছে না বা ক্লাস্টারটি ডিলিট/পজ হয়ে গেছে।")
+    print("দয়া করে MongoDB Atlas থেকে নতুন URI নিয়ে Render-এর Environment Variable-এ MONGO_URI হিসেবে সেট করুন।\n")
+    sys.exit(1)
+except Exception as e:
+    print(f"\n❌ Database Error: {e}\n")
+    sys.exit(1)
 
 app = Client("shilacall_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 web = Flask(__name__)
@@ -50,7 +62,7 @@ admin_steps = {}
 async def start_cmd(client, message):
     user_id = message.from_user.id
     
-    # Auto Menu Button (অটো ওয়েব অ্যাপ লিংক সেট)
+    # Auto Menu Button
     try:
         await client.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonWebApp(text="🚀 Open App", web_app=WebAppInfo(url=f"{WEB_URL}/")))
     except: pass
@@ -117,7 +129,6 @@ async def cmd_addcata(client, message):
 
 @app.on_message(filters.command("addcoupon") & filters.user(ADMIN_ID))
 async def cmd_addcoupon(client, message):
-    # Format: /addcoupon CODE 100
     args = message.text.split()
     await coupons_col.insert_one({"code": args[1], "coins": int(args[2]), "used_by": []})
     await message.reply(f"✅ Coupon {args[1]} added for {args[2]} coins.")
@@ -129,11 +140,10 @@ async def cmd_addbks(client, message):
 
 @app.on_message(filters.command(["adson", "adsoff", "setautodel", "setgroup", "adpremiun", "delpremiun"]) & filters.user(ADMIN_ID))
 async def generic_admin_cmds(client, message):
-    # আপনার আগের সব কমান্ড ডাটাবেসে সেভ হবে
     await message.reply("✅ Command Executed (Backend Updated).")
 
 # ==========================================
-# 4. HANDLE WEB APP DATA (Buy, File, Coupon)
+# 4. HANDLE WEB APP DATA
 # ==========================================
 @app.on_message(filters.service)
 async def web_app_handler(client, message):
@@ -142,7 +152,6 @@ async def web_app_handler(client, message):
     uid = message.from_user.id
     config = await settings_col.find_one({"_id": "config"}) or {}
     
-    # 1. Redeem Coupon Logic
     if data.startswith("coupon_"):
         code = data.replace("coupon_", "")
         coupon = await coupons_col.find_one({"code": code})
@@ -154,20 +163,17 @@ async def web_app_handler(client, message):
             await message.reply("❌ কুপনটি ভুল বা আপনি আগে ব্যবহার করেছেন।")
         return
         
-    # 2. Buy Package
     if data.startswith("buy_"):
         grp = config.get("admin_group")
         if grp: await app.send_message(grp, f"🚨 New Order! ID: `{uid}`, Pkg: {data}")
         await message.reply("✅ আপনার প্যাকেজ রিকোয়েস্ট এডমিনের কাছে গেছে।")
         return
 
-    # 3. File Send (Increase view count)
     await files_col.update_one({"file_id": data}, {"$inc": {"views": 1}})
     await client.send_cached_media(chat_id=uid, file_id=data)
 
-
 # ==========================================
-# 5. SUPER ADVANCED FRONTEND (HTML+JS+CSS)
+# 5. FRONTEND (HTML+JS+CSS)
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -178,7 +184,6 @@ HTML_TEMPLATE = """
     <title>Viral Video App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        /* CSS Variables for Dark/Light Mode */
         :root {
             --bg-color: #0f1015;
             --card-bg: #1c1c24;
@@ -200,26 +205,21 @@ HTML_TEMPLATE = """
         .page { display: none; padding: 15px; }
         .page.active { display: block; }
         
-        /* Category Scroller */
         .cat-scroll { display: flex; overflow-x: auto; gap: 10px; padding-bottom: 10px; margin-bottom: 15px; }
         .cat-btn { background: var(--card-bg); border: 1px solid var(--border-color); padding: 8px 15px; border-radius: 20px; white-space: nowrap; font-size: 12px;}
         .cat-btn.active { background: var(--primary); color: white; border: none; }
         
-        /* Video Cards */
         .card { background: var(--card-bg); border-radius: 12px; margin-bottom: 20px; position: relative; border: 1px solid var(--border-color);}
         .card img { width: 100%; height: 180px; object-fit: cover; border-top-left-radius: 12px; border-top-right-radius: 12px; }
         .card-info { padding: 12px; }
         .premium-tag { position: absolute; top: 10px; right: 10px; background: #b026ff; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: bold; }
         
-        /* Gradient Cards */
         .balance-card { background: linear-gradient(45deg, var(--primary), #7a00ff); border-radius: 15px; padding: 20px; text-align: center; margin-bottom: 20px; color: white; }
         .menu-item { background: var(--card-bg); margin-bottom: 15px; padding: 15px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border-color);}
         
-        /* Inputs & Buttons */
         input[type="text"] { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color); margin-top: 10px; box-sizing: border-box;}
         .btn { background: var(--primary); color: white; padding: 12px; text-align: center; border-radius: 8px; font-weight: bold; margin-top: 10px; cursor: pointer;}
         
-        /* Toggle Switch */
         .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
         .switch input { opacity: 0; width: 0; height: 0; }
         .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 20px; }
@@ -238,9 +238,7 @@ HTML_TEMPLATE = """
         <div class="coin-box" id="user-balance">🪙 0</div>
     </div>
 
-    <!-- HOME PAGE -->
     <div id="page-home" class="page active">
-        <!-- Dynamic Categories -->
         <div class="cat-scroll">
             <div class="cat-btn active">All</div>
             {% for cat in cats %}
@@ -248,10 +246,8 @@ HTML_TEMPLATE = """
             {% endfor %}
         </div>
 
-        <!-- Dynamic Files -->
         {% for file in files %}
         <div class="card" onclick="sendAction('{{ file.file_id }}')">
-            <!-- Simulated Auto Screenshot Thumbnail -->
             <img src="https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=600" alt="Video">
             <div class="premium-tag">▶ Play</div>
             <div class="card-info">
@@ -264,7 +260,6 @@ HTML_TEMPLATE = """
         {% endfor %}
     </div>
 
-    <!-- PREMIUM PAGE -->
     <div id="page-premium" class="page">
         <h3 style="color: var(--primary);">Buy Packages</h3>
         {% for pkg in bkash_pkgs %}
@@ -275,7 +270,6 @@ HTML_TEMPLATE = """
         {% endfor %}
     </div>
 
-    <!-- SETTINGS PAGE (With Dark Mode & Redeem) -->
     <div id="page-settings" class="page">
         <div class="balance-card">
             <p>আপনার ব্যালেন্স</p>
@@ -284,7 +278,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="menu-item">
-            <span>🌙 Dark Mode (ডার্ক থিম)</span>
+            <span>🌙 Dark Mode</span>
             <label class="switch">
                 <input type="checkbox" id="theme-toggle" checked onchange="toggleTheme()">
                 <span class="slider"></span>
@@ -308,12 +302,10 @@ HTML_TEMPLATE = """
         let tg = window.Telegram.WebApp;
         tg.expand();
 
-        // 🔴 AUTO USER ID GRABBER (No need for URL parameters)
         let user = tg.initDataUnsafe.user;
         let userId = user ? user.id : 0;
         document.getElementById("user-id-display").innerText = "ID: " + userId;
 
-        // Fetch User Balance via API
         fetch('/api/user/' + userId)
             .then(res => res.json())
             .then(data => {
@@ -321,13 +313,11 @@ HTML_TEMPLATE = """
                 document.getElementById("big-balance").innerText = "🪙 " + data.balance;
             });
 
-        // Theme Toggle
         function toggleTheme() {
             let isDark = document.getElementById("theme-toggle").checked;
             document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
         }
 
-        // Navigation
         function switchPage(pageId) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.getElementById('page-' + pageId).classList.add('active');
@@ -335,13 +325,11 @@ HTML_TEMPLATE = """
             event.currentTarget.classList.add('active');
         }
 
-        // Send Data to Bot
         function sendAction(actionData) {
             tg.sendData(actionData);
             tg.close();
         }
 
-        // Redeem Coupon
         function redeemCoupon() {
             let code = document.getElementById("coupon-code").value;
             if(code.trim() !== "") {
@@ -354,7 +342,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# Web Routes
 @web.route('/')
 def home():
     files = list(sync_files.find().sort("_id", -1))
