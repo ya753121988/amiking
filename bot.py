@@ -4,6 +4,7 @@ import asyncio
 import threading
 import random
 import string
+import time
 import requests
 from datetime import datetime, timedelta
 
@@ -16,13 +17,13 @@ except RuntimeError:
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
-from pyrogram.errors import UserNotParticipant
+from pyrogram.errors import UserNotParticipant, FloodWait
 from flask import Flask, render_template_string, jsonify, request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION (আপনার ভ্যালুগুলো দিন)
 # ==========================================
 API_ID = int(os.environ.get("API_ID", 29904834))
 API_HASH = os.environ.get("API_HASH", "8b4fd9ef578af114502feeafa2d31938")
@@ -74,6 +75,11 @@ async def get_config():
         await config_col.insert_one(conf)
     return conf
 
+# Custom filter to ignore commands for text state handler
+def is_not_command(_, __, message):
+    return bool(message.text and not message.text.startswith("/"))
+not_cmd_filter = filters.create(is_not_command)
+
 # ==========================================
 # 3. GET ADMIN ID COMMAND (সবার জন্য ওপেন)
 # ==========================================
@@ -93,7 +99,7 @@ async def start_cmd(client, message):
     args = message.text.split()
     config = await get_config()
     
-    # --- 1. MUST JOIN CHANNEL VERIFICATION ---
+    # --- MUST JOIN CHANNEL VERIFICATION ---
     channels = await channels_col.find().to_list(100)
     not_joined = []
     for ch in channels:
@@ -108,7 +114,7 @@ async def start_cmd(client, message):
         buttons.append([InlineKeyboardButton("✅ Joined", callback_data="check_join")])
         return await message.reply("❌ আপনাকে আগে আমাদের মাস্ট চ্যানেলে জয়েন করতে হবে:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # --- 2. USER REGISTRATION & REFERRAL ---
+    # --- USER REGISTRATION & REFERRAL ---
     user = await users_col.find_one({"_id": user_id})
     if not user:
         await users_col.insert_one({
@@ -122,11 +128,11 @@ async def start_cmd(client, message):
             ref_by = int(args[1])
             if ref_by != user_id and config.get("ref_coin", 0) > 0:
                 await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config["ref_coin"]}})
-                try: await app.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! +{config['ref_coin']} Coins")
+                try: await client.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! +{config['ref_coin']} Coins")
                 except: pass
         user = await users_col.find_one({"_id": user_id})
 
-    # --- 3. DEEP LINK: SENDING FILE AFTER AD ---
+    # --- DEEP LINK: SENDING FILE AFTER AD ---
     if len(args) > 1 and args[1].startswith("file_"):
         file_id = args[1].replace("file_", "")
         file_data = await files_col.find_one({"_id": file_id})
@@ -153,7 +159,7 @@ async def start_cmd(client, message):
             await message.reply("❌ ফাইলটি পাওয়া যায়নি!")
         return
 
-    # --- 4. PROFILE GENERATION ---
+    # --- PROFILE GENERATION ---
     is_prem = False
     if user.get("is_premium") and user.get("premium_expiry"):
         if datetime.now() < user["premium_expiry"]:
@@ -183,64 +189,9 @@ async def check_join_cb(client, query):
     await query.message.delete()
     await start_cmd(client, query.message)
 
-# ==========================================
-# 5. TELEGRAPH SCREENSHOT UPLOAD & FILE ADD
-# ==========================================
-def upload_to_telegraph(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            res = requests.post('https://telegra.ph/upload', files={'file': ('file.jpg', f, 'image/jpeg')}).json()
-        return "https://telegra.ph" + res[0]['src']
-    except: return None
-
-@app.on_message(filters.command("new") & filters.user(ADMIN_ID))
-async def cmd_new(client, message):
-    admin_steps[ADMIN_ID] = {"step": "title"}
-    await message.reply("১. ভিডিওর টাইটেল দিন:")
-
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private)
-async def handle_admin_text(client, message):
-    step = admin_steps.get(ADMIN_ID, {}).get("step")
-    if step == "title":
-        admin_steps[ADMIN_ID]["title"] = message.text
-        admin_steps[ADMIN_ID]["step"] = "category"
-        await message.reply("২. ক্যাটাগরির নাম দিন (অথবা All লিখুন):")
-    elif step == "category":
-        admin_steps[ADMIN_ID]["category"] = message.text
-        admin_steps[ADMIN_ID]["step"] = "file"
-        await message.reply("৩. এবার ভিডিওটি সেন্ড করুন (অটো স্ক্রিনশট নেওয়া হবে):")
-
-@app.on_message(filters.video & filters.user(ADMIN_ID) & filters.private)
-async def handle_admin_video(client, message):
-    step = admin_steps.get(ADMIN_ID, {}).get("step")
-    if step == "file":
-        msg = await message.reply("⏳ স্ক্রিনশট তৈরি করে ডাটাবেসে সেভ করা হচ্ছে...")
-        
-        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        file_id = message.video.file_id
-        
-        thumb_url = ""
-        if message.video.thumbs:
-            thumb_path = f"{short_id}.jpg"
-            await client.download_media(message.video.thumbs[0].file_id, file_name=thumb_path)
-            uploaded_url = await asyncio.to_thread(upload_to_telegraph, thumb_path)
-            if uploaded_url: thumb_url = uploaded_url
-            try: os.remove(thumb_path)
-            except: pass
-            
-        await files_col.insert_one({
-            "_id": short_id,
-            "title": admin_steps[ADMIN_ID]["title"], 
-            "category": admin_steps[ADMIN_ID]["category"], 
-            "file_id": file_id, 
-            "thumb_url": thumb_url,
-            "views": 0
-        })
-        del admin_steps[ADMIN_ID]
-        await msg.edit_text("✅ ভিডিও ও স্ক্রিনশট সফলভাবে মিনি-অ্যাপে এড হয়েছে!")
 
 # ==========================================
-# 6. ALL 30+ ADMIN COMMANDS 
+# 5. ALL 30+ ADMIN COMMANDS (Fix Applied)
 # ==========================================
 @app.on_message(filters.command("addchannel") & filters.user(ADMIN_ID))
 async def cmd_addchannel(client, message):
@@ -297,7 +248,7 @@ async def cmd_adpremium(client, message):
         expiry = datetime.now() + timedelta(days=days)
         await users_col.update_one({"_id": uid}, {"$set": {"is_premium": True, "premium_expiry": expiry}})
         await message.reply(f"✅ User {uid} is Premium for {days} days.")
-        try: await app.send_message(uid, f"🎉 আপনাকে {days} দিনের জন্য Premium দেওয়া হয়েছে!")
+        try: await client.send_message(uid, f"🎉 আপনাকে {days} দিনের জন্য Premium দেওয়া হয়েছে!")
         except: pass
     except: await message.reply("Format: /adpremiun userid 1day")
 
@@ -399,6 +350,63 @@ async def universal_deleter(client, query):
     await query.message.edit_text("✅ ডিলিট সম্পন্ন হয়েছে!")
 
 # ==========================================
+# 6. TELEGRAPH SCREENSHOT UPLOAD & FILE ADD
+# ==========================================
+def upload_to_telegraph(file_path):
+    try:
+        with open(file_path, 'rb') as f:
+            res = requests.post('https://telegra.ph/upload', files={'file': ('file.jpg', f, 'image/jpeg')}).json()
+        return "https://telegra.ph" + res[0]['src']
+    except: return None
+
+@app.on_message(filters.command("new") & filters.user(ADMIN_ID))
+async def cmd_new(client, message):
+    admin_steps[ADMIN_ID] = {"step": "title"}
+    await message.reply("১. ভিডিওর টাইটেল দিন:")
+
+# Fixed: Using not_cmd_filter to prevent blocking other commands!
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & not_cmd_filter)
+async def handle_admin_text(client, message):
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "title":
+        admin_steps[ADMIN_ID]["title"] = message.text
+        admin_steps[ADMIN_ID]["step"] = "category"
+        await message.reply("২. ক্যাটাগরির নাম দিন (অথবা All লিখুন):")
+    elif step == "category":
+        admin_steps[ADMIN_ID]["category"] = message.text
+        admin_steps[ADMIN_ID]["step"] = "file"
+        await message.reply("৩. এবার ভিডিওটি সেন্ড করুন (অটো স্ক্রিনশট নেওয়া হবে):")
+
+@app.on_message(filters.video & filters.user(ADMIN_ID) & filters.private)
+async def handle_admin_video(client, message):
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "file":
+        msg = await message.reply("⏳ স্ক্রিনশট তৈরি করে ডাটাবেসে সেভ করা হচ্ছে...")
+        
+        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        file_id = message.video.file_id
+        
+        thumb_url = ""
+        if message.video.thumbs:
+            thumb_path = f"{short_id}.jpg"
+            await client.download_media(message.video.thumbs[0].file_id, file_name=thumb_path)
+            uploaded_url = await asyncio.to_thread(upload_to_telegraph, thumb_path)
+            if uploaded_url: thumb_url = uploaded_url
+            try: os.remove(thumb_path)
+            except: pass
+            
+        await files_col.insert_one({
+            "_id": short_id,
+            "title": admin_steps[ADMIN_ID]["title"], 
+            "category": admin_steps[ADMIN_ID]["category"], 
+            "file_id": file_id, 
+            "thumb_url": thumb_url,
+            "views": 0
+        })
+        del admin_steps[ADMIN_ID]
+        await msg.edit_text("✅ ভিডিও ও স্ক্রিনশট সফলভাবে মিনি-অ্যাপে এড হয়েছে!")
+
+# ==========================================
 # 7. WEB API FOR MINI APP
 # ==========================================
 @web.route('/api/get_ad/<int:user_id>')
@@ -425,8 +433,11 @@ def buy_package_api():
     
     if grp:
         msg = f"🚨 **New Buy Order!**\n🆔 User ID: `{data['uid']}`\n📦 Package: {data['pkg']}"
-        try: app.send_message(grp, msg)
-        except: pass
+        try: 
+            # Fixed Async Calling from Sync Flask Route
+            asyncio.run_coroutine_threadsafe(app.send_message(grp, msg), loop)
+        except Exception as e: 
+            print(f"Group send error: {e}")
     return jsonify({"status": "success"})
 
 
@@ -605,12 +616,25 @@ def home():
     return render_template_string(HTML_TEMPLATE, files=files, cats=cats, bkash_pkgs=bkash_pkgs, usd_pkgs=usd_pkgs, bot_username=BOT_USERNAME)
 
 # ==========================================
-# 9. RUN SERVERS
+# 9. RUN SERVERS (With FloodWait Auto-Fix)
 # ==========================================
 def run_flask(): 
     port = int(os.environ.get("PORT", 8080))
-    web.run(host="0.0.0.0", port=port)
+    web.run(host="0.0.0.0", port=port, debug=False)
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
-    app.run()
+    
+    # 🔴 The ultimate FloodWait Protection Loop
+    while True:
+        try:
+            print("🚀 Starting Bot...")
+            app.run()
+            break  
+        except FloodWait as e:
+            wait_time = e.value
+            print(f"⚠️ Telegram Rate Limit! Waiting for {wait_time} seconds before retrying...")
+            time.sleep(wait_time) 
+        except Exception as e:
+            print(f"❌ Core Error: {e}")
+            break
