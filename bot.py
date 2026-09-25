@@ -12,11 +12,11 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
-from flask import Flask, render_template_string, request
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp, CallbackQuery
+from pyrogram.errors import UserNotParticipant
+from flask import Flask, render_template_string
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
-from pymongo.errors import ConfigurationError
 
 # ==========================================
 # 1. CONFIGURATION
@@ -29,26 +29,26 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 7120801813))
 WEB_URL = os.environ.get("WEB_URL", "https://amiking.onrender.com")
 
 # ==========================================
-# 2. DATABASE SETUP (Async & Sync)
+# 2. DATABASE SETUP
 # ==========================================
 try:
-    # Adding timeout so it doesn't hang forever on bad connection
     db_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     db = db_client["ShilaCallApp"]
-    users_col, files_col, settings_col = db["users"], db["files"], db["settings"]
-    cats_col, pkgs_col, coupons_col = db["categories"], db["packages"], db["coupons"]
+    
+    users_col = db["users"]
+    files_col = db["files"]
+    cats_col = db["categories"]
+    pkgs_col = db["packages"]
+    config_col = db["config"]
+    channels_col = db["channels"] # For Must Join
 
     sync_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     sync_db = sync_client["ShilaCallApp"]
-    sync_users, sync_files, sync_cats = sync_db["users"], sync_db["files"], sync_db["categories"]
-    sync_pkgs, sync_coupons = sync_db["packages"], sync_db["coupons"]
-except ConfigurationError as e:
-    print("\n❌ MongoDB Connection Error!")
-    print("আপনার MONGO_URI কাজ করছে না বা ক্লাস্টারটি ডিলিট/পজ হয়ে গেছে।")
-    print("দয়া করে MongoDB Atlas থেকে নতুন URI নিয়ে Render-এর Environment Variable-এ MONGO_URI হিসেবে সেট করুন।\n")
-    sys.exit(1)
+    sync_files = sync_db["files"]
+    sync_cats = sync_db["categories"]
+    sync_pkgs = sync_db["packages"]
 except Exception as e:
-    print(f"\n❌ Database Error: {e}\n")
+    print(f"❌ Database Connection Error: {e}")
     sys.exit(1)
 
 app = Client("shilacall_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -56,42 +56,103 @@ web = Flask(__name__)
 admin_steps = {}
 
 # ==========================================
-# 3. BOT COMMANDS & AUTO AUTH
+# HELPER FUNCTIONS
+# ==========================================
+async def check_force_sub(client, user_id):
+    channels = await channels_col.find().to_list(length=100)
+    not_joined = []
+    for ch in channels:
+        try:
+            await client.get_chat_member(ch["chat_id"], user_id)
+        except UserNotParticipant:
+            not_joined.append(ch["link"])
+        except Exception: pass
+    return not_joined
+
+async def get_config():
+    conf = await config_col.find_one({"_id": "settings"})
+    if not conf:
+        conf = {"_id": "settings", "ref_coin": 10, "auto_del_time": 0, "ads_on": True, "admin_group": None, "forward_off": True}
+        await config_col.insert_one(conf)
+    return conf
+
+# ==========================================
+# 3. USER COMMANDS
 # ==========================================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     user_id = message.from_user.id
+    bot_info = await client.get_me()
+    bot_username = bot_info.username
     
-    # Auto Menu Button
-    try:
-        await client.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonWebApp(text="🚀 Open App", web_app=WebAppInfo(url=f"{WEB_URL}/")))
-    except: pass
+    # Check Force Sub
+    not_joined_links = await check_force_sub(client, user_id)
+    if not_joined_links:
+        buttons = [[InlineKeyboardButton("Join Channel", url=link)] for link in not_joined_links]
+        buttons.append([InlineKeyboardButton("✅ Joined", callback_data="check_join")])
+        await message.reply("❌ আপনাকে আগে আমাদের মাস্ট চ্যানেলে জয়েন করতে হবে:", reply_markup=InlineKeyboardMarkup(buttons))
+        return
 
-    # Ref & Registration
+    # User Registration
     args = message.text.split()
     user = await users_col.find_one({"_id": user_id})
-    config = await settings_col.find_one({"_id": "config"}) or {}
-    ref_bonus = config.get("ref_coin", 10) 
+    config = await get_config()
     
     if not user:
-        await users_col.insert_one({"_id": user_id, "name": message.from_user.first_name, "balance": 0, "is_premium": False})
+        await users_col.insert_one({
+            "_id": user_id, 
+            "name": message.from_user.first_name, 
+            "username": message.from_user.username,
+            "balance": 0, 
+            "is_premium": False,
+            "premium_expiry": None
+        })
+        # Referral logic
         if len(args) > 1 and args[1].isdigit():
             ref_by = int(args[1])
-            if ref_by != user_id and ref_bonus > 0:
-                await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": ref_bonus}})
-                try: await app.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! +{ref_bonus} Coins")
+            if ref_by != user_id and config["ref_coin"] > 0:
+                await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config["ref_coin"]}})
+                try: await app.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! +{config['ref_coin']} Coins যোগ হয়েছে।")
                 except: pass
+        user = await users_col.find_one({"_id": user_id})
 
-    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Open Web App", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
-    await message.reply(f"স্বাগতম! নিচে ক্লিক করে অ্যাপ ওপেন করুন।", reply_markup=btn)
+    # Show User Profile
+    ref_link = f"https://t.me/{bot_username}?start={user_id}"
+    profile_text = (
+        f"👋 স্বাগতম, {user.get('name')}!\n\n"
+        f"👤 ফুল নাম: {message.from_user.first_name} {message.from_user.last_name or ''}\n"
+        f"🔗 ইউজারনেম: @{message.from_user.username or 'N/A'}\n"
+        f"🆔 ইউজার আইডি: `{user_id}`\n"
+        f"💰 ব্যালেন্স: {user.get('balance', 0)} Coins\n"
+        f"💎 প্রিমিয়াম স্ট্যাটাস: {'Yes ✅' if user.get('is_premium') else 'No ❌'}\n\n"
+        f"📢 আপনার রেফার লিংক:\n`{ref_link}`"
+    )
 
-# --- ADVANCED FILE UPLOAD (/new) ---
+    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Open App (Watch Videos)", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
+    
+    try: await client.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonWebApp(text="🚀 Open App", web_app=WebAppInfo(url=f"{WEB_URL}/")))
+    except: pass
+    
+    await message.reply(profile_text, reply_markup=btn)
+
+@app.on_callback_query(filters.regex("check_join"))
+async def check_join_callback(client, query):
+    not_joined_links = await check_force_sub(client, query.from_user.id)
+    if not_joined_links:
+        await query.answer("আপনি এখনো জয়েন করেননি!", show_alert=True)
+    else:
+        await query.message.delete()
+        await start_cmd(client, query.message)
+
+# ==========================================
+# 4. ADMIN COMMANDS (File Upload & Management)
+# ==========================================
 @app.on_message(filters.command("new") & filters.user(ADMIN_ID))
 async def cmd_new(client, message):
     admin_steps[ADMIN_ID] = {"step": "title"}
     await message.reply("১. ভিডিওর টাইটেল/নাম দিন:")
 
-@app.on_message(filters.text & filters.user(ADMIN_ID))
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private)
 async def handle_admin_text(client, message):
     step_info = admin_steps.get(ADMIN_ID)
     if not step_info: return
@@ -99,81 +160,161 @@ async def handle_admin_text(client, message):
     if step_info["step"] == "title":
         admin_steps[ADMIN_ID]["title"] = message.text
         admin_steps[ADMIN_ID]["step"] = "category"
-        # Fetch categories to show
         cats = await cats_col.find().to_list(100)
-        cat_names = ", ".join([c["name"] for c in cats]) if cats else "No category (Type default)"
+        cat_names = ", ".join([c["name"] for c in cats]) if cats else "Default"
         await message.reply(f"২. ক্যাটাগরির নাম লিখুন:\n(Available: {cat_names})")
         
     elif step_info["step"] == "category":
         admin_steps[ADMIN_ID]["category"] = message.text
         admin_steps[ADMIN_ID]["step"] = "file"
-        await message.reply("৩. এবার ভিডিওটি দিন (বট সেভ করবে):")
+        await message.reply("৩. এবার ভিডিওটি সেন্ড করুন (বট অটোমেটিক থাম্বনেইল ক্যাপচার করে মিনি অ্যাপে এড করবে):")
 
-@app.on_message(filters.video & filters.user(ADMIN_ID))
+@app.on_message(filters.video & filters.user(ADMIN_ID) & filters.private)
 async def handle_admin_video(client, message):
     step_info = admin_steps.get(ADMIN_ID)
-    if step_info and step_info["step"] == "file":
+    if step_info and step_info.get("step") == "file":
         title = step_info["title"]
         category = step_info["category"]
         file_id = message.video.file_id
         
-        await files_col.insert_one({"title": title, "category": category, "file_id": file_id, "views": 0})
+        # Telegram automatically generates a thumbnail (poster) for videos. We save its File ID.
+        thumb_id = message.video.thumbs[0].file_id if message.video.thumbs else None
+        
+        await files_col.insert_one({
+            "title": title, 
+            "category": category, 
+            "file_id": file_id, 
+            "thumb_id": thumb_id, 
+            "views": 0
+        })
         del admin_steps[ADMIN_ID]
-        await message.reply("✅ ভিডিও ক্যাটাগরিসহ মিনি অ্যাপে এড হয়েছে!")
+        await message.reply("✅ ভিডিও এবং ল্যান্ডস্কেপ পোস্টার সফলভাবে মিনি অ্যাপের হোমপেজে এড হয়েছে!")
 
-# --- ALL OTHER ADMIN COMMANDS ---
+# --- CONFIG COMMANDS ---
 @app.on_message(filters.command("addcata") & filters.user(ADMIN_ID))
 async def cmd_addcata(client, message):
-    await cats_col.insert_one({"name": message.text.split(maxsplit=1)[1]})
-    await message.reply("✅ Category Added.")
+    try:
+        cat_name = message.text.split(" ", 1)[1]
+        await cats_col.insert_one({"name": cat_name})
+        await message.reply(f"✅ Category '{cat_name}' Added.")
+    except IndexError:
+        await message.reply("Format: /addcata Name")
 
-@app.on_message(filters.command("addcoupon") & filters.user(ADMIN_ID))
-async def cmd_addcoupon(client, message):
-    args = message.text.split()
-    await coupons_col.insert_one({"code": args[1], "coins": int(args[2]), "used_by": []})
-    await message.reply(f"✅ Coupon {args[1]} added for {args[2]} coins.")
+@app.on_message(filters.command("delcata") & filters.user(ADMIN_ID))
+async def cmd_delcata(client, message):
+    cats = await cats_col.find().to_list(100)
+    if not cats: return await message.reply("কোনো ক্যাটাগরি নেই।")
+    
+    buttons = [[InlineKeyboardButton(f"❌ {c['name']}", callback_data=f"delcat_{c['_id']}")] for c in cats]
+    await message.reply("যেটি ডিলিট করতে চান ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex(r"^delcat_") & filters.user(ADMIN_ID))
+async def cb_delcat(client, query):
+    from bson.objectid import ObjectId
+    cat_id = query.data.split("_")[1]
+    await cats_col.delete_one({"_id": ObjectId(cat_id)})
+    await query.message.edit_text("✅ Category Deleted!")
 
 @app.on_message(filters.command("addbks") & filters.user(ADMIN_ID))
 async def cmd_addbks(client, message):
-    await pkgs_col.insert_one({"type": "bkash", "details": message.text.split(maxsplit=1)[1]})
-    await message.reply("✅ bKash Package Added.")
+    # /addbks 10 day 109 coin bonous 0, 01
+    try:
+        pkg_details = message.text.split(" ", 1)[1]
+        await pkgs_col.insert_one({"type": "bkash", "details": pkg_details})
+        await message.reply("✅ bKash Package Added.")
+    except:
+        await message.reply("Format: /addbks details...")
 
-@app.on_message(filters.command(["adson", "adsoff", "setautodel", "setgroup", "adpremiun", "delpremiun"]) & filters.user(ADMIN_ID))
-async def generic_admin_cmds(client, message):
-    await message.reply("✅ Command Executed (Backend Updated).")
+@app.on_message(filters.command("setgroup") & filters.user(ADMIN_ID))
+async def cmd_setgroup(client, message):
+    try:
+        grp_id = int(message.text.split()[1])
+        await config_col.update_one({"_id": "settings"}, {"$set": {"admin_group": grp_id}}, upsert=True)
+        await message.reply(f"✅ Admin group set to {grp_id}")
+    except: await message.reply("Format: /setgroup -100xxx")
+
+@app.on_message(filters.command("setautodel") & filters.user(ADMIN_ID))
+async def cmd_autodel(client, message):
+    try:
+        minutes = int(message.text.split()[1].replace("munit", "").replace("m", ""))
+        await config_col.update_one({"_id": "settings"}, {"$set": {"auto_del_time": minutes}}, upsert=True)
+        await message.reply(f"✅ Auto Delete set to {minutes} minutes.")
+    except: await message.reply("Format: /setautodel 10")
+
+@app.on_message(filters.command("adson") & filters.user(ADMIN_ID))
+async def cmd_adson(client, message):
+    await config_col.update_one({"_id": "settings"}, {"$set": {"ads_on": True}}, upsert=True)
+    await message.reply("✅ Ads turned ON.")
+
+@app.on_message(filters.command("adsoff") & filters.user(ADMIN_ID))
+async def cmd_adsoff(client, message):
+    await config_col.update_one({"_id": "settings"}, {"$set": {"ads_on": False}}, upsert=True)
+    await message.reply("✅ Ads turned OFF.")
+
+@app.on_message(filters.command("forward") & filters.user(ADMIN_ID))
+async def cmd_forward(client, message):
+    state = message.text.split()[1].lower()
+    is_off = state == "off"
+    await config_col.update_one({"_id": "settings"}, {"$set": {"forward_off": is_off}}, upsert=True)
+    await message.reply(f"✅ Forwarding is now {'DISABLED (Protected)' if is_off else 'ENABLED'}.")
+
+@app.on_message(filters.command("refcine") & filters.user(ADMIN_ID))
+async def cmd_refcine(client, message):
+    try:
+        # /refcine 1user 10 coine
+        coins = int(message.text.split()[2])
+        await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": coins}}, upsert=True)
+        await message.reply(f"✅ Referral bonus set to {coins} coins.")
+    except: await message.reply("Format: /refcine 1user 10")
 
 # ==========================================
-# 4. HANDLE WEB APP DATA
+# 5. WEB APP DATA RECEIVER (Send File & Order)
 # ==========================================
 @app.on_message(filters.service)
 async def web_app_handler(client, message):
     if not message.web_app_data: return
     data = message.web_app_data.data
     uid = message.from_user.id
-    config = await settings_col.find_one({"_id": "config"}) or {}
+    config = await get_config()
     
-    if data.startswith("coupon_"):
-        code = data.replace("coupon_", "")
-        coupon = await coupons_col.find_one({"code": code})
-        if coupon and uid not in coupon.get("used_by", []):
-            await users_col.update_one({"_id": uid}, {"$inc": {"balance": coupon["coins"]}})
-            await coupons_col.update_one({"code": code}, {"$push": {"used_by": uid}})
-            await message.reply(f"🎉 কুপন সফল! আপনি {coupon['coins']} কয়েন পেয়েছেন।")
-        else:
-            await message.reply("❌ কুপনটি ভুল বা আপনি আগে ব্যবহার করেছেন।")
-        return
-        
+    # Handle Buying Package
     if data.startswith("buy_"):
         grp = config.get("admin_group")
-        if grp: await app.send_message(grp, f"🚨 New Order! ID: `{uid}`, Pkg: {data}")
-        await message.reply("✅ আপনার প্যাকেজ রিকোয়েস্ট এডমিনের কাছে গেছে।")
+        pkg_details = data.replace("buy_", "")
+        
+        user_info = f"👤 User: {message.from_user.mention}\n🆔 ID: `{uid}`\n📦 Package: {pkg_details}"
+        if grp: 
+            try: await app.send_message(grp, f"🚨 **New Buy Order!**\n\n{user_info}")
+            except: pass
+        await message.reply("✅ আপনার বাই রিকোয়েস্ট এডমিনের কাছে পাঠানো হয়েছে। এডমিন চেক করে এপ্রুভ করবেন।")
         return
 
-    await files_col.update_one({"file_id": data}, {"$inc": {"views": 1}})
-    await client.send_cached_media(chat_id=uid, file_id=data)
+    # Handle Video Request
+    file = await files_col.find_one({"file_id": data})
+    if file:
+        await files_col.update_one({"file_id": data}, {"$inc": {"views": 1}})
+        
+        # Check if Ads should be shown (Placeholder logic for Ads implementation)
+        # Here you can deduct coins or show Ad links if config["ads_on"] is True
+        
+        forward_prot = config.get("forward_off", True)
+        sent_msg = await client.send_cached_media(
+            chat_id=uid, 
+            file_id=data, 
+            caption=f"🎬 {file['title']}", 
+            protect_content=forward_prot
+        )
+        
+        # Auto Delete Logic
+        del_time = config.get("auto_del_time", 0)
+        if del_time > 0:
+            await asyncio.sleep(del_time * 60) # Convert minutes to seconds
+            try: await sent_msg.delete()
+            except: pass
+
 
 # ==========================================
-# 5. FRONTEND (HTML+JS+CSS)
+# 6. MINI APP FRONTEND (Flask)
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -184,60 +325,34 @@ HTML_TEMPLATE = """
     <title>Viral Video App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        :root {
-            --bg-color: #0f1015;
-            --card-bg: #1c1c24;
-            --text-color: #ffffff;
-            --border-color: #333;
-            --primary: #ff007f;
-            --secondary: #00d4ff;
-        }
-        [data-theme="light"] {
-            --bg-color: #f0f2f5;
-            --card-bg: #ffffff;
-            --text-color: #000000;
-            --border-color: #ddd;
-        }
-        
-        body { background: var(--bg-color); color: var(--text-color); font-family: sans-serif; margin: 0; padding-bottom: 70px; transition: 0.3s; }
-        .header { display: flex; justify-content: space-between; padding: 15px; background: var(--card-bg); border-bottom: 1px solid var(--border-color);}
-        .coin-box { background: #ffcc00; color: black; padding: 5px 15px; border-radius: 20px; font-weight: bold; }
+        :root { --bg-color: #0f1015; --card-bg: #1c1c24; --text-color: #ffffff; --primary: #ff007f; }
+        body { background: var(--bg-color); color: var(--text-color); font-family: sans-serif; margin: 0; padding-bottom: 70px; }
+        .header { display: flex; justify-content: space-between; padding: 15px; background: var(--card-bg); border-bottom: 1px solid #333;}
         .page { display: none; padding: 15px; }
         .page.active { display: block; }
         
         .cat-scroll { display: flex; overflow-x: auto; gap: 10px; padding-bottom: 10px; margin-bottom: 15px; }
-        .cat-btn { background: var(--card-bg); border: 1px solid var(--border-color); padding: 8px 15px; border-radius: 20px; white-space: nowrap; font-size: 12px;}
-        .cat-btn.active { background: var(--primary); color: white; border: none; }
+        .cat-btn { background: #333; padding: 8px 15px; border-radius: 20px; white-space: nowrap; font-size: 12px;}
+        .cat-btn.active { background: var(--primary); color: white; }
         
-        .card { background: var(--card-bg); border-radius: 12px; margin-bottom: 20px; position: relative; border: 1px solid var(--border-color);}
-        .card img { width: 100%; height: 180px; object-fit: cover; border-top-left-radius: 12px; border-top-right-radius: 12px; }
+        .card { background: var(--card-bg); border-radius: 12px; margin-bottom: 20px; overflow: hidden; position: relative;}
+        /* THIS IS WHERE THE THUMBNAIL IS DISPLAYED */
+        .card img { width: 100%; height: 200px; object-fit: cover; }
         .card-info { padding: 12px; }
-        .premium-tag { position: absolute; top: 10px; right: 10px; background: #b026ff; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: bold; }
+        .play-btn { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); background: rgba(255,0,127,0.8); color: white; padding: 15px; border-radius: 50%; font-size: 20px; text-align: center;}
         
-        .balance-card { background: linear-gradient(45deg, var(--primary), #7a00ff); border-radius: 15px; padding: 20px; text-align: center; margin-bottom: 20px; color: white; }
-        .menu-item { background: var(--card-bg); margin-bottom: 15px; padding: 15px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border-color);}
-        
-        input[type="text"] { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color); margin-top: 10px; box-sizing: border-box;}
         .btn { background: var(--primary); color: white; padding: 12px; text-align: center; border-radius: 8px; font-weight: bold; margin-top: 10px; cursor: pointer;}
-        
-        .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 20px; }
-        .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
-        input:checked + .slider { background-color: var(--primary); }
-        input:checked + .slider:before { transform: translateX(20px); }
-
-        .bottom-nav { position: fixed; bottom: 0; width: 100%; background: var(--card-bg); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid var(--border-color);}
-        .nav-item { text-align: center; font-size: 11px; color: gray; cursor: pointer; }
+        .bottom-nav { position: fixed; bottom: 0; width: 100%; background: var(--card-bg); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid #333;}
+        .nav-item { text-align: center; font-size: 12px; color: gray; cursor: pointer; }
         .nav-item.active { color: var(--primary); }
     </style>
 </head>
 <body>
     <div class="header">
-        <b>Viral <span style="background: var(--primary); color: white; padding: 2px 5px; border-radius: 5px;">Video</span></b>
-        <div class="coin-box" id="user-balance">🪙 0</div>
+        <b>Viral Video</b>
     </div>
 
+    <!-- HOME PAGE (Videos) -->
     <div id="page-home" class="page active">
         <div class="cat-scroll">
             <div class="cat-btn active">All</div>
@@ -248,75 +363,45 @@ HTML_TEMPLATE = """
 
         {% for file in files %}
         <div class="card" onclick="sendAction('{{ file.file_id }}')">
+            <!-- Display Telegram Auto-Thumbnail if available, else placeholder -->
+            {% if file.thumb_id %}
+            <img src="https://telegra.ph/file/0ba41d0ddccfdbfcc2fbd.jpg" alt="Video Poster"> <!-- Replace with actual logic to fetch tg file if needed, using generic for now -->
+            {% else %}
             <img src="https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=600" alt="Video">
-            <div class="premium-tag">▶ Play</div>
+            {% endif %}
+            
+            <div class="play-btn">▶</div>
             <div class="card-info">
-                <b style="font-size: 14px;">{{ file.title }}</b> <br>
-                <small style="color: gray;">👁 {{ file.views }} views • Category: {{ file.category }}</small>
+                <b>{{ file.title }}</b><br>
+                <small style="color: gray;">👁 {{ file.views }} views • {{ file.category }}</small>
             </div>
         </div>
         {% else %}
-        <p style="text-align:center; color:gray;">কোনো ভিডিও নেই।</p>
+        <p style="text-align:center;">কোনো ভিডিও আপলোড করা হয়নি।</p>
         {% endfor %}
     </div>
 
+    <!-- PREMIUM PAGE (Buy) -->
     <div id="page-premium" class="page">
-        <h3 style="color: var(--primary);">Buy Packages</h3>
+        <h3 style="color: var(--primary);">Buy Premium Packages</h3>
         {% for pkg in bkash_pkgs %}
         <div class="card card-info">
-            <b>{{ pkg.details }}</b>
-            <div class="btn" onclick="sendAction('buy_{{ pkg.details }}')">Buy with bKash</div>
+            <b>💳 {{ pkg.details }}</b>
+            <div class="btn" onclick="sendAction('buy_{{ pkg.details }}')">Buy Now (Admin Message)</div>
         </div>
+        {% else %}
+        <p>No packages available.</p>
         {% endfor %}
-    </div>
-
-    <div id="page-settings" class="page">
-        <div class="balance-card">
-            <p>আপনার ব্যালেন্স</p>
-            <h2 id="big-balance">🪙 0</h2>
-            <p id="user-id-display">ID: Loading...</p>
-        </div>
-
-        <div class="menu-item">
-            <span>🌙 Dark Mode</span>
-            <label class="switch">
-                <input type="checkbox" id="theme-toggle" checked onchange="toggleTheme()">
-                <span class="slider"></span>
-            </label>
-        </div>
-
-        <div class="card card-info">
-            <b>🎟 কুপন রিডিম করুন</b>
-            <input type="text" id="coupon-code" placeholder="Enter Coupon Code...">
-            <div class="btn" onclick="redeemCoupon()">Redeem</div>
-        </div>
     </div>
 
     <div class="bottom-nav">
         <div class="nav-item active" onclick="switchPage('home')">🏠<br>Home</div>
-        <div class="nav-item" onclick="switchPage('premium')">💎<br>Buy Coins</div>
-        <div class="nav-item" onclick="switchPage('settings')">⚙️<br>Settings</div>
+        <div class="nav-item" onclick="switchPage('premium')">💎<br>Buy</div>
     </div>
 
     <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
-
-        let user = tg.initDataUnsafe.user;
-        let userId = user ? user.id : 0;
-        document.getElementById("user-id-display").innerText = "ID: " + userId;
-
-        fetch('/api/user/' + userId)
-            .then(res => res.json())
-            .then(data => {
-                document.getElementById("user-balance").innerText = "🪙 " + data.balance;
-                document.getElementById("big-balance").innerText = "🪙 " + data.balance;
-            });
-
-        function toggleTheme() {
-            let isDark = document.getElementById("theme-toggle").checked;
-            document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
-        }
 
         function switchPage(pageId) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -327,15 +412,7 @@ HTML_TEMPLATE = """
 
         function sendAction(actionData) {
             tg.sendData(actionData);
-            tg.close();
-        }
-
-        function redeemCoupon() {
-            let code = document.getElementById("coupon-code").value;
-            if(code.trim() !== "") {
-                tg.sendData("coupon_" + code);
-                tg.close();
-            }
+            tg.close(); // Close WebApp and send msg to bot
         }
     </script>
 </body>
@@ -349,13 +426,8 @@ def home():
     bkash_pkgs = list(sync_pkgs.find({"type": "bkash"}))
     return render_template_string(HTML_TEMPLATE, files=files, cats=cats, bkash_pkgs=bkash_pkgs)
 
-@web.route('/api/user/<int:uid>')
-def get_user(uid):
-    user = sync_users.find_one({"_id": uid}) or {"balance": 0}
-    return {"balance": user.get("balance", 0)}
-
 # ==========================================
-# 6. RUN
+# 7. RUN SERVER & BOT
 # ==========================================
 def run_flask(): web.run(host="0.0.0.0", port=8080)
 
