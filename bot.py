@@ -22,7 +22,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 
 # ==========================================
-# 1. CONFIGURATION (সবকিছু এখানে সেট করুন)
+# 1. CONFIGURATION
 # ==========================================
 API_ID = int(os.environ.get("API_ID", 29904834))
 API_HASH = os.environ.get("API_HASH", "8b4fd9ef578af114502feeafa2d31938")
@@ -57,7 +57,7 @@ try:
     sync_db = sync_client["ShilaCallApp"]
     print("✅ Database Connected Successfully!")
 except Exception as e:
-    print(f"❌ Database Connection Error: {e}")
+    print(f"❌ Database Error: {e}")
 
 app = Client("shilacall_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 web = Flask(__name__)
@@ -75,7 +75,17 @@ async def get_config():
     return conf
 
 # ==========================================
-# 3. USER COMMANDS & DEEP LINK LOGIC
+# 3. GET ADMIN ID COMMAND (সবার জন্য ওপেন)
+# ==========================================
+@app.on_message(filters.command("myid") & filters.private)
+async def cmd_myid(client, message):
+    await message.reply(
+        f"👤 **আপনার টেলিগ্রাম আইডি হলো:** `{message.from_user.id}`\n\n"
+        f"💡 **নির্দেশনা:** আপনি যদি অ্যাডমিন কমান্ডগুলো ব্যবহার করতে চান, তবে Render-এ গিয়ে `Environment Variables` অপশনে `ADMIN_ID` এর ভ্যালু হিসেবে এই আইডিটি বসিয়ে Save দিন।"
+    )
+
+# ==========================================
+# 4. USER START & DEEP LINK LOGIC
 # ==========================================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
@@ -129,12 +139,11 @@ async def start_cmd(client, message):
             sent_file = await client.send_cached_media(
                 chat_id=user_id, 
                 file_id=file_data["file_id"], 
-                caption=f"🎬 **{file_data['title']}**\n\n👁 Views: {file_data['views'] + 1}", 
+                caption=f"🎬 **{file_data['title']}**\n\n👁 Views: {file_data.get('views', 0) + 1}", 
                 protect_content=prot
             )
             await msg.delete()
             
-            # Auto Delete Delay System
             del_time = config.get("auto_del_time", 0)
             if del_time > 0:
                 await asyncio.sleep(del_time * 60)
@@ -175,14 +184,14 @@ async def check_join_cb(client, query):
     await start_cmd(client, query.message)
 
 # ==========================================
-# 4. TELEGRAPH SCREENSHOT UPLOAD & FILE ADD
+# 5. TELEGRAPH SCREENSHOT UPLOAD & FILE ADD
 # ==========================================
 def upload_to_telegraph(file_path):
     try:
         with open(file_path, 'rb') as f:
             res = requests.post('https://telegra.ph/upload', files={'file': ('file.jpg', f, 'image/jpeg')}).json()
         return "https://telegra.ph" + res[0]['src']
-    except: return "https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=600"
+    except: return None
 
 @app.on_message(filters.command("new") & filters.user(ADMIN_ID))
 async def cmd_new(client, message):
@@ -210,12 +219,12 @@ async def handle_admin_video(client, message):
         short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         file_id = message.video.file_id
         
-        # 📸 TELEGRAPH SCREENSHOT SYSTEM
-        thumb_url = "https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=600"
+        thumb_url = ""
         if message.video.thumbs:
             thumb_path = f"{short_id}.jpg"
             await client.download_media(message.video.thumbs[0].file_id, file_name=thumb_path)
-            thumb_url = upload_to_telegraph(thumb_path)
+            uploaded_url = await asyncio.to_thread(upload_to_telegraph, thumb_path)
+            if uploaded_url: thumb_url = uploaded_url
             try: os.remove(thumb_path)
             except: pass
             
@@ -231,17 +240,13 @@ async def handle_admin_video(client, message):
         await msg.edit_text("✅ ভিডিও ও স্ক্রিনশট সফলভাবে মিনি-অ্যাপে এড হয়েছে!")
 
 # ==========================================
-# 5. ALL 30+ ADMIN COMMANDS (FULL LOGIC)
+# 6. ALL 30+ ADMIN COMMANDS 
 # ==========================================
-
-# --- Must Join Channel Management ---
 @app.on_message(filters.command("addchannel") & filters.user(ADMIN_ID))
 async def cmd_addchannel(client, message):
     try:
         parts = message.text.split()
-        chat_id = int(parts[1])
-        link = parts[2]
-        await channels_col.insert_one({"chat_id": chat_id, "link": link})
+        await channels_col.insert_one({"chat_id": int(parts[1]), "link": parts[2]})
         await message.reply("✅ Must Join Channel Added!")
     except: await message.reply("Format: /addchannel -100xxx https://t.me/xyz")
 
@@ -251,7 +256,6 @@ async def cmd_delchannel(client, message):
     buttons = [[InlineKeyboardButton(f"❌ {c['chat_id']}", callback_data=f"delch_{c['_id']}")] for c in chs]
     await message.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
 
-# --- Ads Management ---
 @app.on_message(filters.command("adson") & filters.user(ADMIN_ID))
 async def cmd_adson(client, message):
     await config_col.update_one({"_id": "settings"}, {"$set": {"ads_on": True}}, upsert=True)
@@ -284,7 +288,6 @@ async def cmd_direkfile(client, message):
         await message.reply(f"✅ Ad wait times set to: {times} seconds")
     except: await message.reply("Format: /direkfile 1,3,5 s")
 
-# --- Premium Management ---
 @app.on_message(filters.command("adpremiun") & filters.user(ADMIN_ID))
 async def cmd_adpremium(client, message):
     try:
@@ -306,20 +309,10 @@ async def cmd_delpremium(client, message):
         await message.reply("✅ Premium removed.")
     except: await message.reply("Format: /delpremiun userid")
 
-@app.on_message(filters.command("pradds") & filters.user(ADMIN_ID))
-async def cmd_pradds(client, message):
-    try:
-        val = message.text.split()[1] 
-        await config_col.update_one({"_id": "settings"}, {"$set": {"pradds": val.split(",")}}, upsert=True)
-        await message.reply(f"✅ Premium Ads rule set to {val}")
-    except: await message.reply("Format: /pradds 1,3,8")
-
-# --- Package Management ---
 @app.on_message(filters.command("addbks") & filters.user(ADMIN_ID))
 async def cmd_addbks(client, message):
     try:
-        pkg = message.text.split(" ", 1)[1]
-        await pkgs_col.insert_one({"type": "bkash", "details": pkg})
+        await pkgs_col.insert_one({"type": "bkash", "details": message.text.split(" ", 1)[1]})
         await message.reply("✅ bKash Package Added.")
     except: await message.reply("Format: /addbks 10 day 109 coin")
 
@@ -332,8 +325,7 @@ async def cmd_delbks(client, message):
 @app.on_message(filters.command("addusd") & filters.user(ADMIN_ID))
 async def cmd_addusd(client, message):
     try:
-        pkg = message.text.split(" ", 1)[1]
-        await pkgs_col.insert_one({"type": "usd", "details": pkg})
+        await pkgs_col.insert_one({"type": "usd", "details": message.text.split(" ", 1)[1]})
         await message.reply("✅ USD Package Added.")
     except: await message.reply("Format: /addusd 10 day 2 usd")
 
@@ -343,12 +335,10 @@ async def cmd_delusd(client, message):
     buttons = [[InlineKeyboardButton(f"❌ {p['details'][:20]}", callback_data=f"delpkg_{p['_id']}")] for p in pkgs]
     await message.reply("Delete USD Pkg:", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
 
-# --- Category Management ---
 @app.on_message(filters.command("addcata") & filters.user(ADMIN_ID))
 async def cmd_addcata(client, message):
     try:
-        cat = message.text.split(" ", 1)[1]
-        await cats_col.insert_one({"name": cat})
+        await cats_col.insert_one({"name": message.text.split(" ", 1)[1]})
         await message.reply("✅ Category Added.")
     except: await message.reply("Format: /addcata Name")
 
@@ -358,11 +348,9 @@ async def cmd_delcata(client, message):
     buttons = [[InlineKeyboardButton(f"❌ {c['name']}", callback_data=f"delcat_{c['_id']}")] for c in cats]
     await message.reply("Delete Category:", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
 
-# --- General Settings ---
 @app.on_message(filters.command("refcine") & filters.user(ADMIN_ID))
 async def cmd_refcine(client, message):
     try:
-        # Expected format: /refcine 1user 10 coine
         coins = int(message.text.split()[2])
         await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": coins}}, upsert=True)
         await message.reply(f"✅ Ref Bonus Set: {coins} coins")
@@ -398,7 +386,6 @@ async def cmd_setgrp(client, message):
         await message.reply(f"✅ Admin group set to {grp}")
     except: await message.reply("Format: /setgroup -100xxx")
 
-# --- INLINE BUTTON DELETER ---
 @app.on_callback_query(filters.regex(r"^(delcat_|dellink_|delpkg_|delch_)") & filters.user(ADMIN_ID))
 async def universal_deleter(client, query):
     from bson.objectid import ObjectId
@@ -411,9 +398,8 @@ async def universal_deleter(client, query):
     
     await query.message.edit_text("✅ ডিলিট সম্পন্ন হয়েছে!")
 
-
 # ==========================================
-# 6. WEB API FOR MINI APP
+# 7. WEB API FOR MINI APP
 # ==========================================
 @web.route('/api/get_ad/<int:user_id>')
 def get_ad_api(user_id):
@@ -439,13 +425,13 @@ def buy_package_api():
     
     if grp:
         msg = f"🚨 **New Buy Order!**\n🆔 User ID: `{data['uid']}`\n📦 Package: {data['pkg']}"
-        try: app.send_message(grp, msg) # pyrogram send message directly
+        try: app.send_message(grp, msg)
         except: pass
     return jsonify({"status": "success"})
 
 
 # ==========================================
-# 7. SUPER ADVANCED FRONTEND HTML/UI
+# 8. SUPER ADVANCED FRONTEND HTML/UI
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -509,8 +495,13 @@ HTML_TEMPLATE = """
 
         {% for file in files %}
         <div class="card">
-            <!-- Permanent Telegraph Screenshot -->
-            <img src="{{ file.thumb_url }}" alt="Video">
+            <!-- SAFE IMAGE FALLBACK SYSTEM -->
+            {% if file.thumb_url %}
+                <img src="{{ file.thumb_url }}" alt="Video">
+            {% else %}
+                <img src="https://placehold.co/600x400/1c1c24/ff007f?text=No+Thumbnail+Available" alt="Video">
+            {% endif %}
+            
             <div class="play-btn" onclick="playVideo('{{ file._id }}')">▶</div>
             <div class="card-info">
                 <b>{{ file.title }}</b><br>
@@ -567,7 +558,6 @@ HTML_TEMPLATE = """
             let res = await fetch('/api/get_ad/' + userId);
             let adData = await res.json();
             
-            // Generate Deep Link
             let deepLink = 'https://t.me/' + botUsername + '?start=file_' + fileId;
 
             if (adData.show_ad) {
@@ -615,14 +605,12 @@ def home():
     return render_template_string(HTML_TEMPLATE, files=files, cats=cats, bkash_pkgs=bkash_pkgs, usd_pkgs=usd_pkgs, bot_username=BOT_USERNAME)
 
 # ==========================================
-# 8. RUN SERVERS
+# 9. RUN SERVERS
 # ==========================================
 def run_flask(): 
-    # Render assigns port dynamically using PORT env variable
     port = int(os.environ.get("PORT", 8080))
     web.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    print("🚀 Starting Web Server & Bot...")
     threading.Thread(target=run_flask, daemon=True).start()
     app.run()
