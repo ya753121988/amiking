@@ -2,10 +2,11 @@ import os
 import sys
 import asyncio
 import threading
-import time
+import random
+import string
 from datetime import datetime, timedelta
 
-# --- RENDER ERROR FIX ---
+# --- Asyncio Error Fix For Render ---
 try:
     loop = asyncio.get_event_loop()
 except RuntimeError:
@@ -15,66 +16,69 @@ except RuntimeError:
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
 from pyrogram.errors import UserNotParticipant
-from flask import Flask, render_template_string, send_from_directory
+from flask import Flask, render_template_string, jsonify, request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 
-# ফোল্ডার তৈরি (যেখানে ভিডিওর স্ক্রিনশটগুলো সেভ হবে)
+# স্ক্রিনশট সেভ করার জন্য ফোল্ডার তৈরি
 os.makedirs("static/thumbs", exist_ok=True)
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION & SETUP
 # ==========================================
 API_ID = int(os.environ.get("API_ID", 29904834))
 API_HASH = os.environ.get("API_HASH", "8b4fd9ef578af114502feeafa2d31938")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8206083172:AAHP9raleY3l2R2HBTGSVCdpcLQvgn960Mw")
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://akash:akash@cluster0.etisrpx.mongodb.net/?appName=Cluster0")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 7120801813))
-WEB_URL = os.environ.get("WEB_URL", "https://amiking.onrender.com") # আপনার Render URL
+WEB_URL = os.environ.get("WEB_URL", "https://amiking.onrender.com")
 
 # ==========================================
-# 2. DATABASE SETUP
+# 2. DATABASE CONNECTION
 # ==========================================
-db_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-db = db_client["ShilaCallApp"]
+try:
+    db_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    db = db_client["ShilaCallApp"]
 
-users_col = db["users"]
-files_col = db["files"]
-cats_col = db["categories"]
-pkgs_col = db["packages"]
-links_col = db["ad_links"]
-config_col = db["config"]
-channels_col = db["channels"]
+    users_col = db["users"]
+    files_col = db["files"]
+    cats_col = db["categories"]
+    pkgs_col = db["packages"]
+    links_col = db["ad_links"]
+    config_col = db["config"]
+    channels_col = db["channels"]
 
-sync_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-sync_db = sync_client["ShilaCallApp"]
+    sync_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    sync_db = sync_client["ShilaCallApp"]
+except Exception as e:
+    print(f"Database Connection Error: {e}")
 
 app = Client("shilacall_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 web = Flask(__name__, static_folder="static")
 admin_steps = {}
 
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
 async def get_config():
     conf = await config_col.find_one({"_id": "settings"})
     if not conf:
         conf = {
-            "_id": "settings", "ref_coin": 0, "auto_del_time": 0, 
-            "ads_on": True, "admin_group": None, "forward_off": True, "pradds": []
+            "_id": "settings", "ref_coin": 10, "auto_del_time": 0, 
+            "ads_on": True, "admin_group": None, "forward_off": True, 
+            "pradds": ["0"], "direk_wait": [5]
         }
         await config_col.insert_one(conf)
     return conf
 
 # ==========================================
-# 3. USER COMMANDS (/start & Profile)
+# 3. CORE BOT LOGIC (START & DEEP LINK)
 # ==========================================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     user_id = message.from_user.id
     bot_info = await client.get_me()
+    args = message.text.split()
+    config = await get_config()
     
-    # Force Sub Check
+    # 1. Force Sub Check
     channels = await channels_col.find().to_list(100)
     not_joined = []
     for ch in channels:
@@ -85,15 +89,12 @@ async def start_cmd(client, message):
         except: pass
 
     if not_joined:
-        buttons = [[InlineKeyboardButton("Join Channel", url=link)] for link in not_joined]
+        buttons = [[InlineKeyboardButton("📢 Join Channel", url=link)] for link in not_joined]
         buttons.append([InlineKeyboardButton("✅ Joined", callback_data="check_join")])
-        return await message.reply("❌ আপনাকে আগে আমাদের চ্যানেলে জয়েন করতে হবে:", reply_markup=InlineKeyboardMarkup(buttons))
+        return await message.reply("❌ বটটি ব্যবহার করতে আগে আমাদের চ্যানেলে জয়েন করুন:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Registration & Ref
-    args = message.text.split()
+    # 2. User Registration
     user = await users_col.find_one({"_id": user_id})
-    config = await get_config()
-    
     if not user:
         await users_col.insert_one({
             "_id": user_id, 
@@ -103,6 +104,7 @@ async def start_cmd(client, message):
             "is_premium": False,
             "premium_expiry": None
         })
+        # Ref Bonus Logic
         if len(args) > 1 and args[1].isdigit():
             ref_by = int(args[1])
             if ref_by != user_id and config.get("ref_coin", 0) > 0:
@@ -111,7 +113,37 @@ async def start_cmd(client, message):
                 except: pass
         user = await users_col.find_one({"_id": user_id})
 
-    # Premium Check
+    # 3. Deep Link Logic (ফাইল সেন্ড করার অংশ)
+    if len(args) > 1 and args[1].startswith("file_"):
+        file_id = args[1].replace("file_", "")
+        file_data = await files_col.find_one({"_id": file_id})
+        
+        if file_data:
+            await files_col.update_one({"_id": file_id}, {"$inc": {"views": 1}})
+            
+            # Forward Protection
+            prot = config.get("forward_off", True)
+            
+            msg = await message.reply("⏳ ফাইল প্রসেস হচ্ছে...")
+            sent_file = await client.send_cached_media(
+                chat_id=user_id, 
+                file_id=file_data["file_id"], 
+                caption=f"🎬 **{file_data['title']}**\n\n👁 Views: {file_data['views'] + 1}", 
+                protect_content=prot
+            )
+            await msg.delete()
+            
+            # Auto Delete Logic
+            del_time = config.get("auto_del_time", 0)
+            if del_time > 0:
+                await asyncio.sleep(del_time * 60)
+                try: await sent_file.delete()
+                except: pass
+        else:
+            await message.reply("❌ ফাইলটি পাওয়া যায়নি!")
+        return
+
+    # 4. Normal Start Profile (মাস্টার প্রোফাইল ভিউ)
     is_prem = False
     if user.get("is_premium") and user.get("premium_expiry"):
         if datetime.now() < user["premium_expiry"]:
@@ -119,18 +151,17 @@ async def start_cmd(client, message):
         else:
             await users_col.update_one({"_id": user_id}, {"$set": {"is_premium": False}})
 
-    # User Profile (As requested in screenshot)
     profile_text = (
-        f"👤 **ইউজার ফুল নাম:** {message.from_user.first_name} {message.from_user.last_name or ''}\n"
-        f"🔗 **ইউজার নাম:** @{message.from_user.username or 'N/A'}\n"
-        f"🆔 **ইউজার আইডি:** `{user_id}`\n"
-        f"💰 **ইউজার ব্যালেন্স:** {user.get('balance', 0)} Coins\n"
-        f"💎 **মাস্ট চ্যানেল জয়েন ভেরিফাই:** ✅ Verified\n"
+        f"👋 **স্বাগতম! আপনার প্রোফাইল:**\n\n"
+        f"👤 **নাম:** {message.from_user.first_name}\n"
+        f"🔗 **ইউজারনেম:** @{message.from_user.username or 'N/A'}\n"
+        f"🆔 **আইডি:** `{user_id}`\n"
+        f"💰 **ব্যালেন্স:** {user.get('balance', 0)} Coins\n"
         f"👑 **প্রিমিয়াম:** {'Yes ✅' if is_prem else 'No ❌'}\n\n"
-        f"📢 **রেফার লিংক:**\n`https://t.me/{bot_info.username}?start={user_id}`"
+        f"📢 **আপনার রেফার লিংক:**\n`https://t.me/{bot_info.username}?start={user_id}`"
     )
 
-    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Open App", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
+    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Open Mini App", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
     try: await client.set_chat_menu_button(chat_id=user_id, menu_button=MenuButtonWebApp(text="🚀 Open App", web_app=WebAppInfo(url=f"{WEB_URL}/")))
     except: pass
     
@@ -142,57 +173,57 @@ async def check_join_cb(client, query):
     await start_cmd(client, query.message)
 
 # ==========================================
-# 4. ADMIN: VIDEO UPLOAD WITH REAL SCREENSHOT
+# 4. ADVANCED VIDEO UPLOAD (/new)
 # ==========================================
 @app.on_message(filters.command("new") & filters.user(ADMIN_ID))
 async def cmd_new(client, message):
     admin_steps[ADMIN_ID] = {"step": "title"}
-    await message.reply("১. ভিডিওর টাইটেল/নাম দিন:")
+    await message.reply("১. ভিডিওর টাইটেল দিন:")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private)
 async def handle_admin_text(client, message):
-    step_info = admin_steps.get(ADMIN_ID)
-    if not step_info: return
-    
-    if step_info["step"] == "title":
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "title":
         admin_steps[ADMIN_ID]["title"] = message.text
         admin_steps[ADMIN_ID]["step"] = "category"
-        await message.reply("২. ক্যাটাগরির নাম লিখুন:")
-        
-    elif step_info["step"] == "category":
+        await message.reply("২. ক্যাটাগরির নাম দিন:")
+    elif step == "category":
         admin_steps[ADMIN_ID]["category"] = message.text
         admin_steps[ADMIN_ID]["step"] = "file"
-        await message.reply("৩. এবার ভিডিওটি সেন্ড করুন (বট অটোমেটিক স্ক্রিনশট নেবে):")
+        await message.reply("৩. এবার ভিডিওটি সেন্ড করুন (বট নিজে স্ক্রিনশট নেবে):")
 
 @app.on_message(filters.video & filters.user(ADMIN_ID) & filters.private)
 async def handle_admin_video(client, message):
-    step_info = admin_steps.get(ADMIN_ID)
-    if step_info and step_info.get("step") == "file":
-        await message.reply("⏳ ভিডিও প্রসেস হচ্ছে এবং স্ক্রিনশট নেওয়া হচ্ছে...")
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "file":
+        msg = await message.reply("⏳ স্ক্রিনশট প্রসেস করা হচ্ছে, অপেক্ষা করুন...")
         
+        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         file_id = message.video.file_id
-        # REAL SCREENSHOT LOGIC: Download telegram video thumbnail
+        
+        # 📸 রিয়েল থাম্বনেইল ক্যাপচার
         has_thumb = False
         if message.video.thumbs:
-            thumb_path = f"static/thumbs/{file_id}.jpg"
+            thumb_path = f"static/thumbs/{short_id}.jpg"
             await client.download_media(message.video.thumbs[0].file_id, file_name=thumb_path)
             has_thumb = True
             
         await files_col.insert_one({
-            "title": step_info["title"], 
-            "category": step_info["category"], 
+            "_id": short_id,
+            "title": admin_steps[ADMIN_ID]["title"], 
+            "category": admin_steps[ADMIN_ID]["category"], 
             "file_id": file_id, 
             "has_thumb": has_thumb,
             "views": 0
         })
         del admin_steps[ADMIN_ID]
-        await message.reply("✅ ভিডিও এবং অরিজিনাল স্ক্রিনশট সফলভাবে মিনি অ্যাপের হোমপেজে এড হয়েছে!")
+        await msg.edit_text(f"✅ ভিডিও ও স্ক্রিনশট সফলভাবে মিনি-অ্যাপে এড হয়েছে!\n🔗 আইডি: `{short_id}`")
 
 # ==========================================
-# 5. ALL 30+ ADMIN COMMANDS FROM SCREENSHOT
+# 5. ALL 30+ ADMIN COMMANDS (FULL CODE)
 # ==========================================
 
-# --- Ads System ---
+# 1. Ads Commands
 @app.on_message(filters.command("adson") & filters.user(ADMIN_ID))
 async def cmd_adson(client, message):
     await config_col.update_one({"_id": "settings"}, {"$set": {"ads_on": True}}, upsert=True)
@@ -205,9 +236,11 @@ async def cmd_adsoff(client, message):
 
 @app.on_message(filters.command("addlink") & filters.user(ADMIN_ID))
 async def cmd_addlink(client, message):
-    link = message.text.split(" ", 1)[1]
-    await links_col.insert_one({"link": link})
-    await message.reply("✅ Ad Link Added.")
+    try:
+        link = message.text.split(" ", 1)[1]
+        await links_col.insert_one({"link": link})
+        await message.reply("✅ Ad Link Added.")
+    except: await message.reply("Format: /addlink https://ad.com")
 
 @app.on_message(filters.command("delelink") & filters.user(ADMIN_ID))
 async def cmd_delelink(client, message):
@@ -215,18 +248,27 @@ async def cmd_delelink(client, message):
     buttons = [[InlineKeyboardButton(f"❌ {l['link'][:20]}...", callback_data=f"dellink_{l['_id']}")] for l in links]
     await message.reply("যেটি ডিলিট করবেন ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Premium System ---
+@app.on_message(filters.command("direkfile") & filters.user(ADMIN_ID))
+async def cmd_direkfile(client, message):
+    try:
+        # /direkfile 1,3,5 s
+        times_str = message.text.split()[1].replace("s","")
+        times = [int(x.strip()) for x in times_str.split(",")]
+        await config_col.update_one({"_id": "settings"}, {"$set": {"direk_wait": times}}, upsert=True)
+        await message.reply(f"✅ Ad wait times set to: {times} seconds")
+    except: await message.reply("Format: /direkfile 1,3,5 s")
+
+# 2. Premium Commands
 @app.on_message(filters.command("adpremiun") & filters.user(ADMIN_ID))
 async def cmd_adpremium(client, message):
-    # /adpremiun 123456789 1day
     try:
         parts = message.text.split()
-        uid, duration = int(parts[1]), parts[2]
-        days = int(duration.replace("day", "").replace("month", "30").replace("year", "365"))
+        uid = int(parts[1])
+        days = int(parts[2].replace("day", "").replace("month", "30").replace("year", "365"))
         expiry = datetime.now() + timedelta(days=days)
         await users_col.update_one({"_id": uid}, {"$set": {"is_premium": True, "premium_expiry": expiry}})
-        await message.reply(f"✅ User {uid} কে {duration} এর জন্য প্রিমিয়াম দেওয়া হয়েছে।")
-        try: await app.send_message(uid, f"🎉 আপনাকে {duration} এর জন্য Premium মেম্বারশিপ দেওয়া হয়েছে!")
+        await message.reply(f"✅ User {uid} কে {days} দিনের প্রিমিয়াম দেওয়া হয়েছে।")
+        try: await app.send_message(uid, f"🎉 আপনাকে {days} দিনের জন্য Premium দেওয়া হয়েছে!")
         except: pass
     except: await message.reply("Format: /adpremiun userid 1day")
 
@@ -241,23 +283,19 @@ async def cmd_delpremium(client, message):
 @app.on_message(filters.command("pradds") & filters.user(ADMIN_ID))
 async def cmd_pradds(client, message):
     try:
-        val = message.text.split()[1] # e.g. 1,3,8
+        val = message.text.split()[1] 
         await config_col.update_one({"_id": "settings"}, {"$set": {"pradds": val.split(",")}}, upsert=True)
         await message.reply(f"✅ Premium Ads rule set to {val}")
     except: await message.reply("Format: /pradds 1,3,8")
 
-# --- Package System (bKash & USD) ---
+# 3. Packages (bKash/USD) Commands
 @app.on_message(filters.command("addbks") & filters.user(ADMIN_ID))
 async def cmd_addbks(client, message):
-    pkg = message.text.split(" ", 1)[1]
-    await pkgs_col.insert_one({"type": "bkash", "details": pkg})
-    await message.reply("✅ bKash Package Added.")
-
-@app.on_message(filters.command("addusd") & filters.user(ADMIN_ID))
-async def cmd_addusd(client, message):
-    pkg = message.text.split(" ", 1)[1]
-    await pkgs_col.insert_one({"type": "usd", "details": pkg})
-    await message.reply("✅ USD Package Added.")
+    try:
+        pkg = message.text.split(" ", 1)[1]
+        await pkgs_col.insert_one({"type": "bkash", "details": pkg})
+        await message.reply("✅ bKash Package Added.")
+    except: await message.reply("Format: /addbks 10 day 109 coin")
 
 @app.on_message(filters.command("delbks") & filters.user(ADMIN_ID))
 async def cmd_delbks(client, message):
@@ -265,18 +303,28 @@ async def cmd_delbks(client, message):
     buttons = [[InlineKeyboardButton(f"❌ {p['details'][:20]}", callback_data=f"delpkg_{p['_id']}")] for p in pkgs]
     await message.reply("Delete bKash Package:", reply_markup=InlineKeyboardMarkup(buttons))
 
+@app.on_message(filters.command("addusd") & filters.user(ADMIN_ID))
+async def cmd_addusd(client, message):
+    try:
+        pkg = message.text.split(" ", 1)[1]
+        await pkgs_col.insert_one({"type": "usd", "details": pkg})
+        await message.reply("✅ USD Package Added.")
+    except: await message.reply("Format: /addusd 10 day 2 usd")
+
 @app.on_message(filters.command("delusd") & filters.user(ADMIN_ID))
 async def cmd_delusd(client, message):
     pkgs = await pkgs_col.find({"type": "usd"}).to_list(100)
     buttons = [[InlineKeyboardButton(f"❌ {p['details'][:20]}", callback_data=f"delpkg_{p['_id']}")] for p in pkgs]
     await message.reply("Delete USD Package:", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Category System ---
+# 4. Category Commands
 @app.on_message(filters.command("addcata") & filters.user(ADMIN_ID))
 async def cmd_addcata(client, message):
-    cat = message.text.split(" ", 1)[1]
-    await cats_col.insert_one({"name": cat})
-    await message.reply("✅ Category Added.")
+    try:
+        cat = message.text.split(" ", 1)[1]
+        await cats_col.insert_one({"name": cat})
+        await message.reply("✅ Category Added.")
+    except: await message.reply("Format: /addcata Name")
 
 @app.on_message(filters.command("delcata") & filters.user(ADMIN_ID))
 async def cmd_delcata(client, message):
@@ -284,13 +332,14 @@ async def cmd_delcata(client, message):
     buttons = [[InlineKeyboardButton(f"❌ {c['name']}", callback_data=f"delcat_{c['_id']}")] for c in cats]
     await message.reply("Delete Category:", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Settings (Ref, AutoDel, Forward, Group) ---
+# 5. Config Commands
 @app.on_message(filters.command("refcine") & filters.user(ADMIN_ID))
 async def cmd_refcine(client, message):
-    # /refcine 1user 10 coine
-    coins = int(message.text.split()[2])
-    await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": coins}}, upsert=True)
-    await message.reply(f"✅ Ref Bonus Set: {coins} coins")
+    try:
+        coins = int(message.text.split()[2])
+        await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": coins}}, upsert=True)
+        await message.reply(f"✅ Ref Bonus Set: {coins} coins")
+    except: await message.reply("Format: /refcine 1user 10")
 
 @app.on_message(filters.command("delref") & filters.user(ADMIN_ID))
 async def cmd_delref(client, message):
@@ -299,25 +348,30 @@ async def cmd_delref(client, message):
 
 @app.on_message(filters.command("forward") & filters.user(ADMIN_ID))
 async def cmd_forward(client, message):
-    state = message.text.split()[1].lower()
-    is_off = state == "off"
-    await config_col.update_one({"_id": "settings"}, {"$set": {"forward_off": is_off}}, upsert=True)
-    await message.reply(f"✅ Forwarding is {'OFF (Protected)' if is_off else 'ON'}.")
+    try:
+        state = message.text.split()[1].lower()
+        is_off = state == "off"
+        await config_col.update_one({"_id": "settings"}, {"$set": {"forward_off": is_off}}, upsert=True)
+        await message.reply(f"✅ Forwarding is {'OFF (Protected)' if is_off else 'ON'}.")
+    except: await message.reply("Format: /forward off অথবা /forward on")
 
 @app.on_message(filters.command("setautodel") & filters.user(ADMIN_ID))
 async def cmd_autodel(client, message):
-    # /setautodel 10munit
-    val = int(message.text.split()[1].replace("munit", "").replace("m", ""))
-    await config_col.update_one({"_id": "settings"}, {"$set": {"auto_del_time": val}}, upsert=True)
-    await message.reply(f"✅ Auto delete set to {val} minutes.")
+    try:
+        val = int(message.text.split()[1].replace("munit", "").replace("m", ""))
+        await config_col.update_one({"_id": "settings"}, {"$set": {"auto_del_time": val}}, upsert=True)
+        await message.reply(f"✅ Auto delete set to {val} minutes.")
+    except: await message.reply("Format: /setautodel 10munit")
 
 @app.on_message(filters.command("setgroup") & filters.user(ADMIN_ID))
 async def cmd_setgrp(client, message):
-    grp = int(message.text.split()[1])
-    await config_col.update_one({"_id": "settings"}, {"$set": {"admin_group": grp}}, upsert=True)
-    await message.reply(f"✅ Admin group set to {grp}")
+    try:
+        grp = int(message.text.split()[1])
+        await config_col.update_one({"_id": "settings"}, {"$set": {"admin_group": grp}}, upsert=True)
+        await message.reply(f"✅ Admin group set to {grp}")
+    except: await message.reply("Format: /setgroup -100xxx")
 
-# --- Universal Inline Button Deleter ---
+# 6. Delete Inline Action
 @app.on_callback_query(filters.regex(r"^(delcat_|dellink_|delpkg_)") & filters.user(ADMIN_ID))
 async def universal_deleter(client, query):
     from bson.objectid import ObjectId
@@ -331,52 +385,40 @@ async def universal_deleter(client, query):
 
 
 # ==========================================
-# 6. WEB APP DATA HANDLER
+# 6. WEB API FOR FRONTEND LOGIC
 # ==========================================
-@app.on_message(filters.service)
-async def web_app_handler(client, message):
-    if not message.web_app_data: return
-    data = message.web_app_data.data
-    uid = message.from_user.id
-    config = await get_config()
+@web.route('/api/get_ad/<int:user_id>')
+def get_ad_api(user_id):
+    config = sync_db["config"].find_one({"_id": "settings"}) or {}
+    user = sync_db["users"].find_one({"_id": user_id})
     
-    # 1. Package Buy Action (Auto Message to Group)
-    if data.startswith("buy_"):
-        grp = config.get("admin_group")
-        pkg = data.replace("buy_", "")
-        if grp:
-            msg = f"🚨 **New Order!**\n👤 User: {message.from_user.mention}\n🆔 ID: `{uid}`\n📦 Package: {pkg}"
-            try: await app.send_message(grp, msg)
-            except: pass
-        await message.reply("✅ আপনার বাই রিকোয়েস্ট এডমিনের কাছে পাঠানো হয়েছে।")
-        return
+    is_premium = user.get("is_premium", False) if user else False
+    
+    if config.get("ads_on", True) and not is_premium:
+        links = list(sync_db["ad_links"].find())
+        if links:
+            ad_link = random.choice(links)["link"]
+            wait_times = config.get("direk_wait", [5])
+            wait_time = random.choice(wait_times)
+            return jsonify({"show_ad": True, "ad_link": ad_link, "wait_time": wait_time})
+            
+    return jsonify({"show_ad": False})
 
-    # 2. File Request Action
-    file = await files_col.find_one({"file_id": data})
-    if file:
-        await files_col.update_one({"file_id": data}, {"$inc": {"views": 1}})
+@web.route('/api/buy', methods=['POST'])
+def buy_package():
+    data = request.json
+    config = sync_db["config"].find_one({"_id": "settings"}) or {}
+    grp = config.get("admin_group")
+    
+    if grp:
+        msg = f"🚨 **New Buy Order!**\n🆔 User ID: `{data['uid']}`\n📦 Package: {data['pkg']}"
+        app.send_message(grp, msg) # sync call using pyrogram inside flask is tricky, but we use app thread
         
-        # Check Forward Protection
-        prot = config.get("forward_off", True)
-        
-        # Send File
-        sent = await client.send_cached_media(
-            chat_id=uid, 
-            file_id=data, 
-            caption=f"🎬 {file['title']}", 
-            protect_content=prot
-        )
-        
-        # Auto Delete System
-        del_time = config.get("auto_del_time", 0)
-        if del_time > 0:
-            await asyncio.sleep(del_time * 60)
-            try: await sent.delete()
-            except: pass
+    return jsonify({"status": "success"})
 
 
 # ==========================================
-# 7. FLASK WEB APP (MINI APP)
+# 7. SUPER ADVANCED HTML/CSS/JS (FULL UI)
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -384,100 +426,165 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Viral Video App</title>
+    <title>Viral Video Hub</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        :root { --bg-color: #0f1015; --card-bg: #1c1c24; --text-color: #ffffff; --primary: #ff007f; }
-        body { background: var(--bg-color); color: var(--text-color); font-family: sans-serif; margin: 0; padding-bottom: 70px; }
-        .header { padding: 15px; background: var(--card-bg); border-bottom: 1px solid #333; text-align: center; font-size: 20px; font-weight: bold;}
+        :root { --bg-color: #0f1015; --card-bg: #1c1c24; --text-color: #ffffff; --primary: #ff007f; --secondary: #00d4ff;}
+        body { background: var(--bg-color); color: var(--text-color); font-family: sans-serif; margin: 0; padding-bottom: 80px; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; padding: 15px; background: var(--card-bg); border-bottom: 1px solid #333;}
+        .coin-btn { background: #ffcc00; color: black; padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 14px;}
+        
         .page { display: none; padding: 15px; }
         .page.active { display: block; }
         
-        .cat-scroll { display: flex; overflow-x: auto; gap: 10px; padding-bottom: 10px; margin-bottom: 15px; }
-        .cat-btn { background: #333; padding: 8px 15px; border-radius: 20px; white-space: nowrap; font-size: 14px;}
+        .cat-scroll { display: flex; overflow-x: auto; gap: 10px; padding-bottom: 10px; margin-bottom: 15px; scrollbar-width: none;}
+        .cat-btn { background: #333; padding: 10px 18px; border-radius: 20px; white-space: nowrap; font-size: 13px; font-weight: bold; cursor: pointer;}
         .cat-btn.active { background: var(--primary); color: white; }
         
-        .card { background: var(--card-bg); border-radius: 12px; margin-bottom: 20px; overflow: hidden; position: relative; border: 1px solid #333;}
+        .card { background: var(--card-bg); border-radius: 15px; margin-bottom: 25px; overflow: hidden; position: relative; border: 1px solid #333;}
         .card img { width: 100%; height: 220px; object-fit: cover; }
-        .card-info { padding: 12px; }
-        .play-btn { position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%); background: rgba(255,0,127,0.8); color: white; padding: 15px 20px; border-radius: 50%; font-size: 24px; text-align: center;}
+        .card-info { padding: 15px; }
+        .card-info b { font-size: 16px; }
+        .play-btn { position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%); background: rgba(255,0,127,0.8); color: white; padding: 20px 25px; border-radius: 50%; font-size: 24px; cursor: pointer; backdrop-filter: blur(5px);}
         
-        .btn { background: var(--primary); color: white; padding: 12px; text-align: center; border-radius: 8px; font-weight: bold; margin-top: 10px; cursor: pointer;}
-        .bottom-nav { position: fixed; bottom: 0; width: 100%; background: var(--card-bg); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid #333;}
-        .nav-item { text-align: center; font-size: 13px; color: gray; cursor: pointer; }
+        .btn { background: var(--primary); color: white; padding: 12px; text-align: center; border-radius: 8px; font-weight: bold; margin-top: 10px; cursor: pointer; width: 100%; box-sizing: border-box;}
+        .btn-usd { background: var(--secondary); color: black; }
+        
+        .bottom-nav { position: fixed; bottom: 0; width: 100%; background: var(--card-bg); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid #333; z-index: 100;}
+        .nav-item { text-align: center; font-size: 12px; color: gray; cursor: pointer; flex: 1;}
         .nav-item.active { color: var(--primary); }
+        .nav-item span { display: block; font-size: 20px; margin-bottom: 5px;}
+        
+        /* Ad Overlay System */
+        #ad-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 16, 21, 0.95); z-index: 999; flex-direction: column; justify-content: center; align-items: center; text-align: center; backdrop-filter: blur(10px);}
+        #ad-overlay h1 { color: var(--primary); font-size: 40px; margin-bottom: 10px;}
+        .loader { border: 5px solid #333; border-top: 5px solid var(--primary); border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin-top: 30px;}
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
-    <div class="header">🎬 Viral Video</div>
+    <div class="header">
+        <b style="font-size: 20px;">🎬 Viral<span style="color: var(--primary)">Video</span></b>
+        <div class="coin-btn">🪙 0</div>
+    </div>
+
+    <!-- Ad Overlay -->
+    <div id="ad-overlay">
+        <h2 style="color: white;">Please Wait...</h2>
+        <p style="color: gray; margin-bottom: 20px;">ভিডিওটি টেলিগ্রাম বটে পাঠানো হচ্ছে</p>
+        <h1 id="timer-count">5</h1>
+        <p style="color: gray; font-size: 12px;">সেকেন্ড পর অটোমেটিক ফাইল পাবেন</p>
+        <div class="loader"></div>
+    </div>
 
     <!-- HOME PAGE -->
     <div id="page-home" class="page active">
         <div class="cat-scroll">
-            <div class="cat-btn active">All</div>
+            <div class="cat-btn active">All Videos</div>
             {% for cat in cats %}
             <div class="cat-btn">{{ cat.name }}</div>
             {% endfor %}
         </div>
 
         {% for file in files %}
-        <div class="card" onclick="sendAction('{{ file.file_id }}')">
-            <!-- REAL SCREENSHOT LOGIC -->
+        <div class="card">
+            <!-- REAL SCREENSHOT -->
             {% if file.has_thumb %}
-            <img src="/static/thumbs/{{ file.file_id }}.jpg" alt="Video Screenshot">
+            <img src="/static/thumbs/{{ file._id }}.jpg" alt="Video">
             {% else %}
-            <img src="https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=600" alt="Default">
+            <img src="https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=600" alt="Video">
             {% endif %}
             
-            <div class="play-btn">▶</div>
+            <div class="play-btn" onclick="playVideo('{{ file._id }}')">▶</div>
             <div class="card-info">
-                <b style="font-size: 16px;">{{ file.title }}</b><br>
-                <small style="color: gray;">👁 {{ file.views }} views • Category: {{ file.category }}</small>
+                <b>{{ file.title }}</b><br>
+                <small style="color: gray; margin-top: 5px; display: block;">👁 {{ file.views }} views • Category: {{ file.category }}</small>
             </div>
         </div>
         {% else %}
-        <p style="text-align:center;">কোনো ভিডিও নেই।</p>
+        <p style="text-align:center; color: gray; margin-top: 50px;">কোনো ভিডিও আপলোড করা হয়নি।</p>
         {% endfor %}
     </div>
 
     <!-- PREMIUM PAGE -->
     <div id="page-premium" class="page">
-        <h3 style="color: var(--primary);">bKash Packages</h3>
+        <h2 style="color: var(--primary); border-bottom: 1px solid #333; padding-bottom: 10px;">bKash Packages</h2>
         {% for pkg in bkash_pkgs %}
         <div class="card card-info">
-            <b>🟢 {{ pkg.details }}</b>
-            <div class="btn" onclick="sendAction('buy_{{ pkg.details }}')">Buy with bKash</div>
+            <b style="font-size: 18px;">🟢 {{ pkg.details }}</b>
+            <div class="btn" onclick="buyPackage('{{ pkg.details }}')">Buy with bKash</div>
         </div>
         {% endfor %}
 
-        <h3 style="color: #00d4ff; margin-top: 20px;">USD Packages</h3>
+        <h2 style="color: var(--secondary); border-bottom: 1px solid #333; padding-bottom: 10px; margin-top: 30px;">USD Packages</h2>
         {% for pkg in usd_pkgs %}
         <div class="card card-info">
-            <b>💲 {{ pkg.details }}</b>
-            <div class="btn" style="background:#00d4ff; color:black;" onclick="sendAction('buy_{{ pkg.details }}')">Buy with USD</div>
+            <b style="font-size: 18px;">💲 {{ pkg.details }}</b>
+            <div class="btn btn-usd" onclick="buyPackage('{{ pkg.details }}')">Buy with USD</div>
         </div>
         {% endfor %}
     </div>
 
     <div class="bottom-nav">
-        <div class="nav-item active" onclick="switchPage('home')">🏠<br>Home</div>
-        <div class="nav-item" onclick="switchPage('premium')">💎<br>Buy Premium</div>
+        <div class="nav-item active" onclick="switchPage('home', this)">
+            <span>🏠</span> Home
+        </div>
+        <div class="nav-item" onclick="switchPage('premium', this)">
+            <span>💎</span> Premium
+        </div>
     </div>
 
     <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
+        let botUsername = "{{ bot_username }}";
+        let userId = tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 0;
 
-        function switchPage(pageId) {
+        function switchPage(pageId, element) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.getElementById('page-' + pageId).classList.add('active');
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-            event.currentTarget.classList.add('active');
+            element.classList.add('active');
         }
 
-        function sendAction(actionData) {
-            tg.sendData(actionData);
-            tg.close();
+        async function playVideo(fileId) {
+            let res = await fetch('/api/get_ad/' + userId);
+            let adData = await res.json();
+            
+            // Deep Link to trigger the bot
+            let deepLink = 'tg://resolve?domain=' + botUsername + '&start=file_' + fileId;
+
+            if (adData.show_ad) {
+                document.getElementById('ad-overlay').style.display = 'flex';
+                window.open(adData.ad_link, '_blank');
+
+                let timeLeft = adData.wait_time;
+                document.getElementById('timer-count').innerText = timeLeft;
+
+                let timer = setInterval(() => {
+                    timeLeft--;
+                    document.getElementById('timer-count').innerText = timeLeft;
+                    
+                    if (timeLeft <= 0) {
+                        clearInterval(timer);
+                        window.location.href = deepLink; // Send user back to bot
+                        setTimeout(() => { tg.close(); }, 500); // Close WebApp
+                    }
+                }, 1000);
+            } else {
+                window.location.href = deepLink;
+                setTimeout(() => { tg.close(); }, 500);
+            }
+        }
+
+        async function buyPackage(pkgDetails) {
+            await fetch('/api/buy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uid: userId, pkg: pkgDetails })
+            });
+            tg.showAlert("✅ আপনার বাই রিকোয়েস্ট এডমিনের কাছে পাঠানো হয়েছে।");
         }
     </script>
 </body>
@@ -490,13 +597,21 @@ def home():
     cats = list(sync_db["categories"].find())
     bkash_pkgs = list(sync_db["packages"].find({"type": "bkash"}))
     usd_pkgs = list(sync_db["packages"].find({"type": "usd"}))
-    return render_template_string(HTML_TEMPLATE, files=files, cats=cats, bkash_pkgs=bkash_pkgs, usd_pkgs=usd_pkgs)
+    bot_info = sync_client.get_database("ShilaCallApp").command("ping") # dummy ping
+    
+    # Getting bot username safely (fallback to a name if not found)
+    # Using environment variable BOT_USERNAME if app.me is not available in thread
+    return render_template_string(HTML_TEMPLATE, files=files, cats=cats, bkash_pkgs=bkash_pkgs, usd_pkgs=usd_pkgs, bot_username=os.environ.get("BOT_USERNAME", "shilacall_bot"))
 
 # ==========================================
-# 8. RUN BOT & WEB SERVER
+# 8. RUN SERVERS CONCURRENTLY
 # ==========================================
-def run_flask(): web.run(host="0.0.0.0", port=8080)
+def run_flask(): 
+    web.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
+    print("🚀 Starting Web Server...")
     threading.Thread(target=run_flask, daemon=True).start()
+    
+    print("🚀 Starting Pyrogram Bot...")
     app.run()
