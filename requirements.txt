@@ -1,9 +1,5 @@
 pyrogram
 tgcrypto
 motor
-pymongo
 dnspython
-aiohttp
-opencv-python-headless
-Pillow
-python-dateutil
+Flask
