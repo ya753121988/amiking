@@ -1,5 +1,5 @@
 import os, sys, asyncio, threading, random, string, time, requests, json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- Asyncio & Event Loop Fix ---
 try: loop = asyncio.get_event_loop()
@@ -19,6 +19,7 @@ from pyrogram.errors import UserNotParticipant, FloodWait
 from flask import Flask, render_template_string, jsonify, request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 # ==========================================
 # 1. CONFIGURATION
@@ -33,14 +34,12 @@ WEB_URL = os.environ.get("WEB_URL", "https://amiking.onrender.com")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Sudo_king") 
 BOT_USERNAME = "PronWaliZone_Bot" 
 
-# Clean Webhook to prevent bot freeze
 try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
 except: pass
 
 # ==========================================
 # 2. DATABASE & BOT INITIALIZATION
 # ==========================================
-# Pyrogram in_memory=True is CRITICAL to prevent server hanging!
 app = Client("shilacall_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 web = Flask(__name__)
 admin_steps = {}
@@ -51,7 +50,6 @@ pkgs_col, links_col, config_col, channels_col, coupons_col = None, None, None, N
 
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["ShilaCallApp"]
 
-# Lazy DB Initialization to prevent Asyncio loop crash
 async def get_db():
     global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col
     if db_client is None:
@@ -66,21 +64,27 @@ async def get_config():
     await get_db()
     conf = await config_col.find_one({"_id": "settings"})
     if not conf:
-        conf = {"_id": "settings", "ref_coin": 10, "auto_del_time": 0, "ads_on": True, "direk_wait": [5]}
+        conf = {
+            "_id": "settings", "ref_coin": 10, "ref_on": True, 
+            "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে।",
+            "frotect": False, "ads_on": True, "direk_wait": [5], 
+            "start_logo": None, "start_text": ""
+        }
         await config_col.insert_one(conf)
     return conf
 
 not_cmd_filter = filters.create(lambda _, __, message: bool(message.text and not message.text.startswith("/")))
 
 # ==========================================
-# 3. COMMAND: MYID (Tests if bot is alive)
+# AUTO DELETE TASK
 # ==========================================
-@app.on_message(filters.command("myid"))
-async def cmd_myid(client, message):
-    await message.reply(f"✅ বট ঠিকভাবে কাজ করছে!\n🆔 আপনার আইডি: `{message.from_user.id}`")
+async def delete_msg_later(client, chat_id, msg_id, delay):
+    await asyncio.sleep(delay)
+    try: await client.delete_messages(chat_id, msg_id)
+    except: pass
 
 # ==========================================
-# 4. USER START & MUST JOIN
+# 3. USER START & MUST JOIN
 # ==========================================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
@@ -91,12 +95,16 @@ async def start_cmd(client, message):
     
     user = await users_col.find_one({"_id": user_id})
     if not user:
-        await users_col.insert_one({"_id": user_id, "name": message.from_user.first_name, "balance": 0, "pending_file": None})
+        await users_col.insert_one({
+            "_id": user_id, "name": message.from_user.first_name, 
+            "balance": 0, "pending_file": None, "premium_until": None
+        })
         if len(args) > 1 and args[1].isdigit() and int(args[1]) != user_id:
             ref_by = int(args[1])
-            await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
-            try: await client.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! +{config.get('ref_coin', 10)} Coins")
-            except: pass
+            if config.get("ref_on", True):
+                await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
+                try: await client.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! +{config.get('ref_coin', 10)} Coins")
+                except: pass
         user = await users_col.find_one({"_id": user_id})
 
     # Save pending file if deep linked
@@ -105,8 +113,8 @@ async def start_cmd(client, message):
         await users_col.update_one({"_id": user_id}, {"$set": {"pending_file": pending_file}})
         user["pending_file"] = pending_file
 
-    # Must Join Check
-    channels = await channels_col.find().to_list(100)
+    # Must Join Check (/vercnl)
+    channels = await channels_col.find({"type": "must_join"}).to_list(100)
     not_joined = []
     for ch in channels:
         try: await client.get_chat_member(ch["chat_id"], user_id)
@@ -123,25 +131,65 @@ async def start_cmd(client, message):
         file_id = user["pending_file"]
         await users_col.update_one({"_id": user_id}, {"$set": {"pending_file": None}})
         file_data = await files_col.find_one({"_id": file_id})
+        
         if file_data:
             await files_col.update_one({"_id": file_id}, {"$inc": {"views": 1}})
-            msg = await message.reply("⏳ আপনার ভিডিও পাঠানো হচ্ছে...")
+            msg = await message.reply("⏳ আপনার ফাইল পাঠানো হচ্ছে...")
             try:
-                await client.send_cached_media(chat_id=user_id, file_id=file_data["file_id"], caption=f"🎬 **{file_data['title']}**", protect_content=True)
+                sent_msg = await client.send_cached_media(
+                    chat_id=user_id, 
+                    file_id=file_data["file_id"], 
+                    caption=f"🎬 **{file_data['title']}**", 
+                    protect_content=config.get("frotect", False)
+                )
                 await msg.delete()
+                
+                # Auto Delete Logic
+                del_time = config.get("auto_del_time", 0)
+                if del_time > 0:
+                    del_text = config.get("autodel_text", f"⏳ ফাইলটি {del_time} সেকেন্ড পর অটো ডিলিট হয়ে যাবে।")
+                    await client.send_message(user_id, f"⚠️ {del_text}")
+                    asyncio.create_task(delete_msg_later(client, user_id, sent_msg.id, del_time))
+                    
             except Exception as e: await msg.edit_text(f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
         else: await message.reply("❌ ফাইলটি পাওয়া যায়নি!")
         return
 
-    profile_text = f"👋 **স্বাগতম Glow Top-এ!**\n\n🆔 **আপনার আইডি:** `{user_id}`\n💰 **আপনার ব্যালেন্স:** {user.get('balance', 0)} Coins\n\nনিচের বাটনে ক্লিক করে অ্যাপ ওপেন করুন 👇"
-    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Open Glow Top", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
-    await message.reply(profile_text, reply_markup=btn)
+    # Profile Text Formatting
+    full_name = f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip()
+    first_name = message.from_user.first_name
+    last_name = message.from_user.last_name or "N/A"
+    username = f"@{message.from_user.username}" if message.from_user.username else "N/A"
+
+    profile_text = f"👋 **স্বাগতম Glow Top-এ!**\n\n"
+    profile_text += f"👤 **Full Name:** {full_name}\n"
+    profile_text += f"🔹 **First Name:** {first_name}\n"
+    profile_text += f"🔸 **Last Name:** {last_name}\n"
+    profile_text += f"🆔 **User ID:** `{user_id}`\n"
+    profile_text += f"🌐 **Username:** {username}\n"
+    profile_text += f"💰 **Balance:** {user.get('balance', 0)} Coins\n"
+    
+    if config.get("start_text"):
+        profile_text += f"\n📝 {config.get('start_text')}\n"
+    
+    profile_text += "\n👇 নিচের বাটনগুলো থেকে অ্যাপ ওপেন করুন বা চ্যানেলে যুক্ত হোন:"
+
+    # Inline Channels Buttons
+    inline_channels = await channels_col.find({"type": "inline"}).to_list(100)
+    buttons = [[InlineKeyboardButton(ch["name"], url=ch["link"])] for ch in inline_channels]
+    buttons.insert(0, [InlineKeyboardButton("🔥 Open Glow Top", web_app=WebAppInfo(url=f"{WEB_URL}/"))])
+
+    if config.get("start_logo"):
+        try: await client.send_photo(user_id, photo=config.get("start_logo"), caption=profile_text, reply_markup=InlineKeyboardMarkup(buttons))
+        except: await message.reply(profile_text, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await message.reply(profile_text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_callback_query(filters.regex("check_join"))
 async def check_join_cb(client, query):
     await get_db()
     user_id = query.from_user.id
-    channels = await channels_col.find().to_list(100)
+    channels = await channels_col.find({"type": "must_join"}).to_list(100)
     for ch in channels:
         try: await client.get_chat_member(ch["chat_id"], user_id)
         except: return await query.answer("❌ আপনি এখনো সব চ্যানেলে জয়েন করেননি!", show_alert=True)
@@ -153,48 +201,247 @@ async def check_join_cb(client, query):
     await start_cmd(client, FakeMsg(query.from_user))
 
 # ==========================================
-# 5. ADMIN COMMANDS (All working 100%)
+# 4. ADMIN: CHANNELS & TEXT CONFIG
 # ==========================================
-@app.on_message(filters.command("delpost") & filters.user(ADMIN_ID))
-async def cmd_delpost(client, message):
+@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID))
+async def cmd_addcnl(client, message):
     await get_db()
-    parts = message.text.split()
-    if len(parts) > 1:
-        res = await files_col.delete_one({"_id": parts[1]})
-        if res.deleted_count > 0: await message.reply(f"✅ পোস্ট {parts[1]} ডিলিট হয়েছে!")
-        else: await message.reply("❌ পোস্ট পাওয়া যায়নি!")
-    else:
-        posts = await files_col.find().sort("_id", -1).limit(10).to_list(10)
-        text = "📝 **Last 10 Posts:**\n\n"
-        for p in posts: text += f"ID: `{p['_id']}` | Title: {p['title'][:15]}\n"
-        text += "\nডিলিট করতে লিখুন: `/delpost ID`"
-        await message.reply(text)
+    try:
+        parts = message.text.split(maxsplit=2)
+        await channels_col.insert_one({"type": "inline", "name": parts[1], "link": parts[2]})
+        await message.reply("✅ Channel button added!")
+    except: await message.reply("Format: `/addcnl Name https://t.me/link`")
 
-@app.on_message(filters.command("addchannel") & filters.user(ADMIN_ID))
-async def cmd_addchannel(client, message):
+@app.on_message(filters.command("delcnl") & filters.user(ADMIN_ID))
+async def cmd_delcnl(client, message):
+    await get_db()
+    chs = await channels_col.find({"type": "inline"}).to_list(100)
+    btns = [[InlineKeyboardButton(f"❌ {c['name']}", callback_data=f"delch_{c['_id']}")] for c in chs]
+    await message.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
+
+@app.on_message(filters.command("vercnl") & filters.user(ADMIN_ID))
+async def cmd_vercnl(client, message):
     await get_db()
     try:
         parts = message.text.split()
-        await channels_col.insert_one({"chat_id": int(parts[1]), "link": parts[2]}); await message.reply("✅ Channel Added!")
-    except: await message.reply("Format: /addchannel -100xxx https://t.me/xyz")
+        await channels_col.insert_one({"type": "must_join", "chat_id": int(parts[1]), "link": parts[2]})
+        await message.reply("✅ Must Join Channel Added!")
+    except: await message.reply("Format: `/vercnl -100xxx https://t.me/xyz`")
 
-@app.on_message(filters.command("delchannel") & filters.user(ADMIN_ID))
-async def cmd_delchannel(client, message):
+@app.on_message(filters.command("delvrcnl") & filters.user(ADMIN_ID))
+async def cmd_delvrcnl(client, message):
     await get_db()
-    chs = await channels_col.find().to_list(100)
-    buttons = [[InlineKeyboardButton(f"❌ {c['chat_id']}", callback_data=f"delch_{c['_id']}")] for c in chs]
-    await message.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+    chs = await channels_col.find({"type": "must_join"}).to_list(100)
+    btns = [[InlineKeyboardButton(f"❌ {c['chat_id']}", callback_data=f"delch_{c['_id']}")] for c in chs]
+    await message.reply("Must Join চ্যানেল ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
 @app.on_callback_query(filters.regex(r"^delch_") & filters.user(ADMIN_ID))
 async def delch_cb(client, query):
     await get_db()
-    from bson.objectid import ObjectId
-    await channels_col.delete_one({"_id": ObjectId(query.data.split("_")[1])}); await query.message.edit_text("✅ ডিলিট সম্পন্ন হয়েছে!")
+    await channels_col.delete_one({"_id": ObjectId(query.data.split("_")[1])})
+    await query.message.edit_text("✅ চ্যানেল ডিলিট সম্পন্ন হয়েছে!")
 
-@app.on_message(filters.command("broadcast") & filters.user(ADMIN_ID))
-async def cmd_broadcast(client, message):
+@app.on_message(filters.command("addtex") & filters.user(ADMIN_ID))
+async def cmd_addtex(client, message):
     await get_db()
-    if not message.reply_to_message: return await message.reply("❌ কোনো মেসেজ রিপ্লাই করে /broadcast লিখুন।")
+    text = message.text.replace("/addtex", "").strip()
+    if text:
+        await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": text}})
+        await message.reply("✅ Start Text সেট করা হয়েছে!")
+    else: await message.reply("Format: `/addtex Hello User...`")
+
+@app.on_message(filters.command("deltex") & filters.user(ADMIN_ID))
+async def cmd_deltex(client, message):
+    await get_db()
+    await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": ""}})
+    await message.reply("✅ Start Text ডিলিট করা হয়েছে!")
+
+@app.on_message(filters.command("logo") & filters.user(ADMIN_ID))
+async def cmd_logo(client, message):
+    await get_db()
+    if message.reply_to_message and message.reply_to_message.photo:
+        file_id = message.reply_to_message.photo.file_id
+        await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": file_id}})
+        await message.reply("✅ Start Logo সেট করা হয়েছে!")
+    else: await message.reply("❌ কোনো ছবি রিপ্লাই করে /logo দিন।")
+
+# ==========================================
+# 5. ADMIN: FILE UPLOAD & DELETE
+# ==========================================
+def upload_to_telegraph(file_path):
+    try:
+        with open(file_path, 'rb') as f:
+            res = requests.post('https://telegra.ph/upload', files={'file': ('file.jpg', f, 'image/jpeg')}).json()
+        return "https://telegra.ph" + res[0]['src']
+    except: return None
+
+@app.on_message(filters.command("addfile") & filters.user(ADMIN_ID))
+async def cmd_addfile(client, message):
+    admin_steps[ADMIN_ID] = {"step": "name"}
+    await message.reply("১. ফাইলের নাম/টাইটেল দিন:")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & not_cmd_filter)
+async def handle_admin_text(client, message):
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "name":
+        admin_steps[ADMIN_ID]["title"] = message.text
+        admin_steps[ADMIN_ID]["step"] = "thumb"
+        await message.reply("২. এবার ফাইলের ছবি বা লোগো দিন (Photo):")
+
+@app.on_message(filters.photo & filters.user(ADMIN_ID) & filters.private)
+async def handle_admin_photo(client, message):
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "thumb":
+        msg = await message.reply("⏳ ছবি প্রসেস হচ্ছে...")
+        photo_path = await message.download()
+        thumb_url = await asyncio.to_thread(upload_to_telegraph, photo_path)
+        try: os.remove(photo_path)
+        except: pass
+        
+        admin_steps[ADMIN_ID]["thumb_url"] = thumb_url or "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+        admin_steps[ADMIN_ID]["step"] = "file"
+        await msg.edit_text("৩. এবার মূল ফাইল (Video/Document) দিন:")
+
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private)
+async def handle_admin_file(client, message):
+    step = admin_steps.get(ADMIN_ID, {}).get("step")
+    if step == "file":
+        await get_db()
+        msg = await message.reply("⏳ ফাইল সেভ করা হচ্ছে...")
+        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        file_id = message.video.file_id if message.video else (message.document.file_id if message.document else message.audio.file_id)
+        
+        await files_col.insert_one({
+            "_id": short_id,
+            "title": admin_steps[ADMIN_ID]["title"], 
+            "category": "All", 
+            "is_premium": False, 
+            "file_id": file_id, 
+            "thumb_url": admin_steps[ADMIN_ID].get("thumb_url", "https://placehold.co/600x400/1c1c24/ff007f?text=Media"),
+            "views": 0
+        })
+        del admin_steps[ADMIN_ID]
+        await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে!\nID: `{short_id}`")
+
+@app.on_message(filters.command("delfile") & filters.user(ADMIN_ID))
+async def cmd_delfile(client, message):
+    await get_db()
+    try:
+        f_id = message.text.split()[1]
+        res = await files_col.delete_one({"_id": f_id})
+        if res.deleted_count > 0: await message.reply("✅ ফাইল ডিলিট হয়েছে!")
+        else: await message.reply("❌ ফাইল পাওয়া যায়নি!")
+    except: await message.reply("Format: `/delfile FileID`")
+
+@app.on_message(filters.command("delall") & filters.user(ADMIN_ID))
+async def cmd_delall(client, message):
+    await get_db()
+    await files_col.delete_many({})
+    await message.reply("✅ সকল ফাইল ডিলিট করা হয়েছে!")
+
+# ==========================================
+# 6. ADMIN: COINS, REFERRAL & PROTECT
+# ==========================================
+@app.on_message(filters.command("refbonous") & filters.user(ADMIN_ID))
+async def cmd_refbonous(client, message):
+    await get_db()
+    try:
+        coin = int(message.text.split()[1])
+        await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": coin, "ref_on": True}})
+        await message.reply(f"✅ পার রেফারে বোনাস সেট হয়েছে: {coin} Coins")
+    except: await message.reply("Format: `/refbonous 10`")
+
+@app.on_message(filters.command("refbonousoff") & filters.user(ADMIN_ID))
+async def cmd_refbonousoff(client, message):
+    await get_db()
+    await config_col.update_one({"_id": "settings"}, {"$set": {"ref_on": False}})
+    await message.reply("✅ রেফার বোনাস অফ করা হয়েছে! (রেফার হবে কিন্তু কয়েন পাবেনা)")
+
+@app.on_message(filters.command("frotect") & filters.user(ADMIN_ID))
+async def cmd_frotect(client, message):
+    await get_db()
+    state = message.text.split()[1].lower() if len(message.text.split()) > 1 else ""
+    if state == "on":
+        await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": True}})
+        await message.reply("✅ Forward Protect ON")
+    elif state == "off":
+        await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": False}})
+        await message.reply("✅ Forward Protect OFF")
+    else: await message.reply("Format: `/frotect on` or `/frotect off`")
+
+@app.on_message(filters.command("autodel") & filters.user(ADMIN_ID))
+async def cmd_autodel(client, message):
+    await get_db()
+    try:
+        t = int(message.text.split()[1])
+        await config_col.update_one({"_id": "settings"}, {"$set": {"auto_del_time": t}})
+        await message.reply(f"✅ অটো ডিলিট টাইম {t} সেকেন্ড সেট করা হয়েছে!")
+    except: await message.reply("Format: `/autodel 60` (Seconds. 0 for OFF)")
+
+@app.on_message(filters.command("autex") & filters.user(ADMIN_ID))
+async def cmd_autex(client, message):
+    await get_db()
+    text = message.text.replace("/autex", "").strip()
+    if text:
+        await config_col.update_one({"_id": "settings"}, {"$set": {"autodel_text": text}})
+        await message.reply("✅ অটো ডিলিট টেক্সট সেট হয়েছে!")
+    else: await message.reply("Format: `/autex Text...`")
+
+# ==========================================
+# 7. ADMIN: PREMIUM & PACKAGES
+# ==========================================
+@app.on_message(filters.command("usd") & filters.user(ADMIN_ID))
+async def cmd_usd(client, message):
+    await get_db()
+    try:
+        parts = message.text.split()
+        details = f"{parts[1]} USD={parts[2]} Days Premium"
+        await pkgs_col.insert_one({"type": "usd", "details": details})
+        await message.reply("✅ USD প্যাকেজ অ্যাড হয়েছে!")
+    except: await message.reply("Format: `/usd 1 7` (1 usd 7 days)")
+
+@app.on_message(filters.command("bdt") & filters.user(ADMIN_ID))
+async def cmd_bdt(client, message):
+    await get_db()
+    try:
+        parts = message.text.split()
+        details = f"{parts[1]} BDT={parts[2]} Days Premium"
+        await pkgs_col.insert_one({"type": "bkash", "details": details})
+        await message.reply("✅ BDT প্যাকেজ অ্যাড হয়েছে!")
+    except: await message.reply("Format: `/bdt 100 7` (100 bdt 7 days)")
+
+@app.on_message(filters.command("addrdiem") & filters.user(ADMIN_ID))
+async def cmd_addrdiem(client, message):
+    await get_db()
+    try:
+        parts = message.text.split()
+        u_id, amount, unit = int(parts[1]), int(parts[2]), parts[3].lower()
+        secs = {"s": 1, "m": 60, "h": 3600, "d": 86400, "y": 31536000}.get(unit, 0)
+        
+        if secs > 0:
+            expiry = datetime.now() + timedelta(seconds=amount * secs)
+            await users_col.update_one({"_id": u_id}, {"$set": {"premium_until": expiry}})
+            await message.reply(f"✅ User `{u_id}` কে {amount} {unit} এর জন্য প্রিমিয়াম করা হয়েছে!")
+            try: await client.send_message(u_id, f"🎉 আপনার অ্যাকাউন্টে {amount} {unit} এর জন্য প্রিমিয়াম অ্যাক্সেস যুক্ত করা হয়েছে!")
+            except: pass
+    except: await message.reply("Format: `/addrdiem UserID 1 d` (s/m/h/d/y)")
+
+@app.on_message(filters.command("delpremium") & filters.user(ADMIN_ID))
+async def cmd_delpremium(client, message):
+    await get_db()
+    try:
+        u_id = int(message.text.split()[1])
+        await users_col.update_one({"_id": u_id}, {"$set": {"premium_until": None}})
+        await message.reply(f"✅ User `{u_id}` এর প্রিমিয়াম বাতিল করা হয়েছে!")
+    except: await message.reply("Format: `/delpremium UserID`")
+
+# ==========================================
+# 8. ADMIN: BROADCAST & REDEEM COUPONS
+# ==========================================
+@app.on_message(filters.command("brodcast") & filters.user(ADMIN_ID))
+async def cmd_brodcast(client, message):
+    await get_db()
+    if not message.reply_to_message: return await message.reply("❌ কোনো মেসেজ রিপ্লাই করে /brodcast লিখুন।")
     msg = await message.reply("⏳ ব্রডকাস্ট শুরু হয়েছে...")
     users = await users_col.find().to_list(None)
     success = 0
@@ -203,108 +450,34 @@ async def cmd_broadcast(client, message):
         except: pass
     await msg.edit_text(f"✅ ব্রডকাস্ট সম্পন্ন! {success} জনকে পাঠানো হয়েছে।")
 
-@app.on_message(filters.command("addcoupon") & filters.user(ADMIN_ID))
-async def cmd_addcoupon(client, message):
+@app.on_message(filters.command("cnlbdcst") & filters.user(ADMIN_ID))
+async def cmd_cnlbdcst(client, message):
+    if not message.reply_to_message: return await message.reply("❌ মেসেজ রিপ্লাই করুন।")
+    try:
+        chat_id = message.text.split()[1]
+        await message.reply_to_message.copy(chat_id)
+        await message.reply("✅ মেসেজ পাঠানো হয়েছে!")
+    except: await message.reply("Format: `/cnlbdcst -100xxx` (Replying to message)")
+
+@app.on_message(filters.command("allred") & filters.user(ADMIN_ID))
+async def cmd_allred(client, message):
     await get_db()
     try:
         parts = message.text.split()
-        await coupons_col.insert_one({"code": parts[1], "coins": int(parts[2]), "limit": int(parts[3]), "used_by": []})
-        await message.reply(f"✅ কুপন অ্যাড হয়েছে: {parts[1]}")
-    except: await message.reply("Format: /addcoupon CODE 50 100")
-
-# ==========================================
-# 6. UPLOAD POST & SCREENSHOT (FIXED FOR ALL MEDIA)
-# ==========================================
-def upload_to_telegraph(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            res = requests.post('https://telegra.ph/upload', files={'file': ('file.jpg', f, 'image/jpeg')}).json()
-        return "https://telegra.ph" + res[0]['src']
-    except Exception as e:
-        print(f"Telegraph Error: {e}")
-        return None
-
-@app.on_message(filters.command("new") & filters.user(ADMIN_ID))
-async def cmd_new(client, message):
-    admin_steps[ADMIN_ID] = {"step": "title"}
-    await message.reply("১. ভিডিওর টাইটেল দিন:")
-
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & not_cmd_filter)
-async def handle_admin_text(client, message):
-    step = admin_steps.get(ADMIN_ID, {}).get("step")
-    if step == "title":
-        admin_steps[ADMIN_ID]["title"] = message.text
-        admin_steps[ADMIN_ID]["step"] = "category"
-        await message.reply("২. ক্যাটাগরির নাম দিন (অথবা All লিখুন):")
-    elif step == "category":
-        admin_steps[ADMIN_ID]["category"] = message.text
-        admin_steps[ADMIN_ID]["step"] = "premium"
-        await message.reply("৩. এটি কি প্রিমিয়াম ভিডিও? (yes/no):")
-    elif step == "premium":
-        admin_steps[ADMIN_ID]["is_premium"] = message.text.lower() == "yes"
-        admin_steps[ADMIN_ID]["step"] = "file"
-        await message.reply("৪. এবার ভিডিও, ডকুমেন্ট, বা অডিও সেন্ড করুন:")
-
-@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private)
-async def handle_admin_file(client, message):
-    step = admin_steps.get(ADMIN_ID, {}).get("step")
-    if step == "file":
-        await get_db()
-        msg = await message.reply("⏳ ফাইল প্রসেস হচ্ছে, স্ক্রিনশট নিচ্ছি...")
-        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        limit = int(parts[1])
+        r_range = parts[2].split("-")
+        min_c, max_c = int(r_range[0]), int(r_range[1])
         
-        file_id = message.video.file_id if message.video else (message.document.file_id if message.document else message.audio.file_id)
-        thumb_url = ""
-
-        # Attempt 1: Pyrogram native thumbnail
-        media_obj = message.video or message.document
-        if media_obj and hasattr(media_obj, 'thumbs') and media_obj.thumbs:
-            try:
-                thumb_path = f"{short_id}.jpg"
-                await client.download_media(media_obj.thumbs[0].file_id, file_name=thumb_path)
-                thumb_url = await asyncio.to_thread(upload_to_telegraph, thumb_path)
-                os.remove(thumb_path)
-            except: pass
-            
-        # Attempt 2: OpenCV Screenshot (10th frame)
-        if not thumb_url and not message.audio and HAS_CV2:
-            try:
-                await msg.edit_text("⏳ সার্ভারে ফাইলটি ডাউনলোড করা হচ্ছে (একটু সময় লাগতে পারে)...")
-                video_path = await client.download_media(file_id, file_name=f"{short_id}.mp4")
-                
-                await msg.edit_text("⏳ স্ক্রিনশট ফ্রেম কাটা হচ্ছে...")
-                cap = cv2.VideoCapture(video_path)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 10) # Black screen এড়াতে ১০ নাম্বার ফ্রেম
-                ret, frame = cap.read()
-                if ret:
-                    thumb_path = f"{short_id}_cv2.jpg"
-                    cv2.imwrite(thumb_path, frame)
-                    thumb_url = await asyncio.to_thread(upload_to_telegraph, thumb_path)
-                    try: os.remove(thumb_path)
-                    except: pass
-                cap.release()
-                try: os.remove(video_path)
-                except: pass
-            except Exception as e: print(f"CV2 Error: {e}")
-
-        # Fallback if no screenshot found
-        if not thumb_url:
-            thumb_url = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
-
-        await files_col.insert_one({
-            "_id": short_id,
-            "title": admin_steps[ADMIN_ID]["title"], 
-            "category": admin_steps[ADMIN_ID]["category"], 
-            "is_premium": admin_steps[ADMIN_ID]["is_premium"],
-            "file_id": file_id, 
-            "thumb_url": thumb_url,
-            "views": 0
+        code = "RND" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        await coupons_col.insert_one({
+            "code": code, "limit": limit, "used_by": [], 
+            "is_random": True, "min": min_c, "max": max_c
         })
-        del admin_steps[ADMIN_ID]
-        await msg.edit_text(f"✅ মিডিয়া সফলভাবে সেভ হয়েছে!\nPost ID: `{short_id}`")
+        await message.reply(f"✅ Random Coupon Created!\nCode: `{code}`\nLimit: {limit} users\nCoins: {min_c} to {max_c}")
+    except: await message.reply("Format: `/allred 10 1-20`")
 
 # ==========================================
-# 7. WEB API (FLASK)
+# 9. WEB API (FLASK)
 # ==========================================
 @web.route('/api/get_ad/<int:user_id>')
 def get_ad_api(user_id):
@@ -323,15 +496,21 @@ def redeem_coupon():
     data = request.json
     uid, code = data['uid'], data['code']
     coupon = sync_db["coupons"].find_one({"code": code})
+    
     if not coupon: return jsonify({"status": "error", "msg": "❌ Invalid Coupon Code!"})
     if uid in coupon.get("used_by", []): return jsonify({"status": "error", "msg": "❌ You already used this!"})
     if len(coupon.get("used_by", [])) >= coupon.get("limit", 0): return jsonify({"status": "error", "msg": "❌ Coupon limit reached!"})
     
+    # Calculate Random or Fixed Coin
+    coin_to_add = random.randint(coupon["min"], coupon["max"]) if coupon.get("is_random") else coupon.get("coins", 0)
+    
     sync_db["coupons"].update_one({"code": code}, {"$push": {"used_by": uid}})
-    sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coupon["coins"]}})
-    try: asyncio.run_coroutine_threadsafe(app.send_message(uid, f"🎉 কুপন রিডিম সফল! +{coupon['coins']} Coins"), loop)
+    sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coin_to_add}})
+    
+    try: asyncio.run_coroutine_threadsafe(app.send_message(uid, f"🎉 কুপন রিডিম সফল! +{coin_to_add} Coins"), loop)
     except: pass
-    return jsonify({"status": "success", "msg": f"✅ Successfully redeemed {coupon['coins']} coins!"})
+    
+    return jsonify({"status": "success", "msg": f"✅ Successfully redeemed {coin_to_add} coins!"})
 
 @web.route('/api/user/<int:user_id>')
 def get_user(user_id):
@@ -339,7 +518,7 @@ def get_user(user_id):
     return jsonify({"balance": user.get("balance", 0) if user else 0})
 
 # ==========================================
-# 8. HTML UI (EXACT GLOW TOP DESIGN & LOGIC)
+# 10. HTML UI (EXACT GLOW TOP DESIGN)
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -394,7 +573,7 @@ HTML_TEMPLATE = """
         .page-btn { background: linear-gradient(90deg, #f02d73, #ff6b6b); color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight:bold;}
         .page-btn:disabled { background: rgba(255,255,255,0.1); color:#666;}
 
-        /* SETTINGS & SHARE PAGES (Exact Design) */
+        /* SETTINGS & SHARE */
         .balance-card { background: linear-gradient(135deg, #4b2354, #1b1c29); border-radius: 15px; padding: 25px; text-align: center; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05);}
         .set-item { display: flex; align-items: center; background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 12px; cursor:pointer;}
         .set-icon { width: 45px; height: 45px; border-radius: 12px; display: flex; justify-content: center; align-items: center; font-size: 20px; margin-right: 15px;}
@@ -508,7 +687,7 @@ HTML_TEMPLATE = """
     <div id="page-share" class="page">
         <h2 style="margin-top:0;">🎁 বন্ধুকে শেয়ার করুন (Share)</h2>
         <div class="share-banner">
-            🥳 আপনার বন্ধুকে ইনভাইট করুন! প্রতিজন বন্ধু আপনার লিংক দিয়ে বট স্টার্ট করলেই আপনি সাথে সাথে <b style="color:#ffb703;">🏛 10 Coins একদম ফ্রি</b> পেয়ে যাবেন — কোনো লিমিট নেই! 🚀
+            🥳 আপনার বন্ধুকে ইনভাইট করুন! প্রতিজন বন্ধু আপনার লিংক দিয়ে বট স্টার্ট করলেই আপনি সাথে সাথে <b style="color:#ffb703;">বোনাস</b> পেয়ে যাবেন — কোনো লিমিট নেই! 🚀
         </div>
         <p style="color:#aaa; font-size:12px; margin-bottom:8px;">আপনার রেফার লিংক (YOUR REFERRAL LINK)</p>
         <div class="ref-box">
@@ -522,17 +701,17 @@ HTML_TEMPLATE = """
     <div id="page-premium" class="page">
         <h2 style="margin-top:0;">কয়েন কিনুন (Buy Coins)</h2>
         <div style="display:flex; gap:10px; margin-bottom:20px;">
-            <div class="cat-btn active" style="flex:1; text-align:center; border-radius:12px;" onclick="togglePkg('bks', this)">📱 বিকাশ/নগদ</div>
+            <div class="cat-btn active" style="flex:1; text-align:center; border-radius:12px;" onclick="togglePkg('bks', this)">📱 বিকাশ/নগদ (BDT)</div>
             <div class="cat-btn" style="flex:1; text-align:center; border-radius:12px;" onclick="togglePkg('usd', this)">⚡ Instant (USD)</div>
         </div>
         
         <div id="pkg-bks">
             {% for pkg in pkgs if pkg.type == 'bkash' %}
             <div style="background: rgba(255,255,255,0.03); border: 1px solid #ffb703; padding: 20px; border-radius: 15px; margin-bottom: 15px; text-align: center; position: relative;">
-                <div style="position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #ffb703; color: black; font-size: 11px; font-weight: bold; padding: 4px 15px; border-radius: 12px;">⭐ Most Popular</div>
+                <div style="position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #ffb703; color: black; font-size: 11px; font-weight: bold; padding: 4px 15px; border-radius: 12px;">⭐ BDT Premium</div>
                 <div style="font-size:35px; margin-bottom:10px;">🏛</div>
                 <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
-                <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} Coins</p>
+                <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }}</p>
                 <button class="btn-main" style="margin:0; padding:12px;" onclick="reqBuy()">কিনুন (Buy)</button>
             </div>
             {% endfor %}
@@ -541,10 +720,10 @@ HTML_TEMPLATE = """
         <div id="pkg-usd" style="display:none;">
             {% for pkg in pkgs if pkg.type == 'usd' %}
             <div style="background: rgba(255,255,255,0.03); border: 1px solid #00d4ff; padding: 20px; border-radius: 15px; margin-bottom: 15px; text-align: center; position: relative;">
-                <div style="position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #00d4ff; color: black; font-size: 11px; font-weight: bold; padding: 4px 15px; border-radius: 12px;">⚡ Instant</div>
+                <div style="position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #00d4ff; color: black; font-size: 11px; font-weight: bold; padding: 4px 15px; border-radius: 12px;">⚡ USD Premium</div>
                 <div style="font-size:35px; margin-bottom:10px;">💲</div>
                 <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
-                <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} Coins</p>
+                <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }}</p>
                 <button class="btn-main" style="margin:0; padding:12px; background:linear-gradient(90deg, #00d4ff, #00ffcc); color:black;" onclick="reqBuy()">কিনুন (Buy)</button>
             </div>
             {% endfor %}
@@ -576,11 +755,9 @@ HTML_TEMPLATE = """
         }
         loadUser();
 
-        // 18+ Verification
         if(!localStorage.getItem('ageVerified')) { document.getElementById('age-modal').style.display = 'flex'; }
         function confirmAge() { localStorage.setItem('ageVerified', 'true'); document.getElementById('age-modal').style.display = 'none'; }
 
-        // Navigation
         function switchNav(pageId, element=null) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.getElementById('page-' + pageId).classList.add('active');
@@ -597,7 +774,6 @@ HTML_TEMPLATE = """
             document.getElementById('pkg-usd').style.display = type === 'usd' ? 'block' : 'none';
         }
 
-        // Search & Pagination Logic
         let allFiles = {{ files_json | safe }};
         let filteredFiles = [...allFiles];
         let currentPage = 1;
@@ -617,7 +793,7 @@ HTML_TEMPLATE = """
                     ${f.is_premium ? '<div class="tag-premium">💎 PREMIUM</div>' : ''}
                     <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
                     <div class="video-info">
-                        <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title}</b>
+                        <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title} <small style="color:#00d4ff;">[ID: ${f._id}]</small></b>
                         <small style="color:#aaa;">👁 ${f.views} views</small>
                     </div>
                 </div>`;
@@ -654,7 +830,6 @@ HTML_TEMPLATE = """
 
         function changePage(dir) { currentPage += dir; renderVideos(); }
 
-        // Ads & Play
         let currentDeepLink = "";
         async function playVideo(fileId) {
             currentDeepLink = `https://t.me/${botUsername}?start=file_${fileId}`;
@@ -687,7 +862,6 @@ HTML_TEMPLATE = """
             }
         }
 
-        // Actions
         async function redeemCoupon() {
             let code = document.getElementById('coupon-input').value;
             if(!code) return tg.showAlert("কোড লিখুন!");
@@ -722,7 +896,7 @@ def home():
     return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), cats=cats, pkgs=pkgs, bot_username=BOT_USERNAME, admin_username=ADMIN_USERNAME)
 
 # ==========================================
-# 9. RUN SERVERS
+# 11. RUN SERVERS
 # ==========================================
 def run_flask(): 
     port = int(os.environ.get("PORT", 8080))
