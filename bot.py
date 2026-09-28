@@ -253,15 +253,15 @@ async def check_join_cb(c, q):
     await start_cmd(c, FakeMsg(q.from_user))
 
 # ==========================================
-# 5. ADMIN FILE UPLOAD
+# 5. ADMIN FILE UPLOAD (FIXED IMAGE UPLOAD)
 # ==========================================
 def upload_to_telegraph(file_path): 
     try: 
-        # Modded to accept ANY picture extension format
-        ext = file_path.split('.')[-1].lower()
-        mime_type = f'image/{ext}' if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'image/jpeg'
-        with open(file_path, 'rb') as f: 
-            res = requests.post('https://telegra.ph/upload', files={'file': (f'f.{ext}', f, mime_type)}).json() 
+        # Force .jpg extension so Telegraph accepts any format (png/webp/heic) sent from Telegram
+        new_path = file_path + ".jpg"
+        os.rename(file_path, new_path)
+        with open(new_path, 'rb') as f: 
+            res = requests.post('https://telegra.ph/upload', files={'file': ('f.jpg', f, 'image/jpeg')}).json() 
         return "https://telegra.ph" + res[0]['src'] 
     except Exception as e: 
         print(e); return None
@@ -941,7 +941,7 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- STRICT 18+ AGE MODAL -->
+<!-- STRICT 18+ AGE MODAL (EVERY TIME) -->
 <div id="age-modal" class="modal-overlay">
     <div class="modal-box">
         <div style="font-size: 55px; margin-bottom:10px;">🔞</div>
@@ -1172,10 +1172,9 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
-    if(!localStorage.getItem('ageVerified')) { document.getElementById('age-modal').style.display = 'flex'; }
-    
+    // STRICT 18+ NOTICE - EVERY SINGLE TIME IT OPENS
+    document.getElementById('age-modal').style.display = 'flex';
     function confirmAge() { 
-        localStorage.setItem('ageVerified', 'true'); 
         document.getElementById('age-modal').style.display = 'none'; 
     }
 
@@ -1223,7 +1222,6 @@ HTML_TEMPLATE = """
     function renderList(tab) {
         let s = state[tab];
         let filtered = allFiles.filter(f => {
-            // FIXED LOGIC: Home gets EVERYTHING, Reg gets Regular, Prem gets Premium
             if(tab === 'prem' && !f.is_premium) return false;
             if(tab === 'reg' && f.is_premium) return false;
             return f.title.toLowerCase().includes(s.q);
