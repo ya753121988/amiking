@@ -1,12 +1,20 @@
 import os, sys, asyncio, threading, random, string, time, requests, json
 from datetime import datetime, timedelta
+
+# ==========================================
+# 🛑 PYROGRAM PYTHON 3.14 FIX 🛑
+# Pyrogram ইমপোর্ট করার আগে Event Loop সেট করতে হবে
+# ==========================================
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+from pyrogram import Client, filters, idle
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from pyrogram.errors import UserNotParticipant, FloodWait
 from flask import Flask, render_template_string, jsonify, request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-from pyrogram import Client, filters, idle
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-from pyrogram.errors import UserNotParticipant, FloodWait
 
 # ==========================================
 # 1. CONFIGURATION
@@ -30,6 +38,7 @@ except: pass
 app = Client("shilacall_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 web = Flask(__name__)
 admin_steps = {}
+
 db_client, db = None, None
 users_col, files_col, cats_col = None, None, None
 pkgs_col, links_col, config_col, channels_col, coupons_col = None, None, None, None, None
@@ -50,10 +59,12 @@ async def get_config():
     conf = await config_col.find_one({"_id": "settings"})
     if not conf:
         conf = {
-            "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে।",
-            "frotect": False, "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1,
-            "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME,
-            "autovid_msg_id": None, "autovid_time_min": 0, "autopost_time_hr": 0, "autopost_idx": 0
+            "_id": "settings", "ref_coin": 10, "ref_on": True, 
+            "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে।",
+            "frotect": False, "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, 
+            "prstep": 1, "regstep": 1, "start_logo": None, "start_text": "", 
+            "payment_admin": DEFAULT_ADMIN_USERNAME, "autovid_msg_id": None, 
+            "autovid_time_min": 0, "autopost_time_hr": 0, "autopost_idx": 0
         }
         await config_col.insert_one(conf)
     return conf
@@ -106,7 +117,7 @@ async def background_tasks():
         now = time.time()
         try:
             config = await get_config()
-            # Auto Vid
+            # 1. Auto Vid (Tutorials)
             av_min = config.get("autovid_time_min", 0)
             if av_min > 0 and config.get("autovid_msg_id") and (now - last_autovid) >= (av_min * 60):
                 users = await users_col.find().to_list(None)
@@ -121,7 +132,7 @@ async def background_tasks():
                     except: pass
                 last_autovid = time.time()
             
-            # Auto Post
+            # 2. Auto Post (Notify new videos)
             ap_hr = config.get("autopost_time_hr", 0)
             if ap_hr > 0 and (now - last_autopost) >= (ap_hr * 3600):
                 idx = config.get("autopost_idx", 0)
@@ -178,6 +189,7 @@ async def start_cmd(client, message):
         await users_col.update_one({"_id": uid}, {"$set": {"pending_file": pf}})
         user["pending_file"] = pf
 
+    # Must Join Channels Check
     channels = await channels_col.find({"type": "must_join"}).to_list(100)
     not_joined = []
     for ch in channels:
@@ -190,6 +202,7 @@ async def start_cmd(client, message):
         btns.append([InlineKeyboardButton("✅ Joined", callback_data="check_join")])
         return await message.reply("❌ আপনাকে আগে আমাদের চ্যানেলগুলোতে জয়েন করতে হবে:", reply_markup=InlineKeyboardMarkup(btns))
 
+    # Provide Pending File
     if user.get("pending_file"):
         f_id = user["pending_file"]
         await users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}})
@@ -211,7 +224,7 @@ async def start_cmd(client, message):
         else: await message.reply("❌ ফাইলটি পাওয়া যায়নি!")
         return
 
-    # User Profile & Membership Logic
+    # User Info Construction
     full = f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip()
     uname = f"@{message.from_user.username}" if message.from_user.username else "N/A"
     
@@ -224,6 +237,7 @@ async def start_cmd(client, message):
     if config.get("start_text"): txt += f"\n📝 {config.get('start_text')}\n"
     txt += "\n👇 নিচের বাটনগুলো থেকে অ্যাপ ওপেন করুন বা চ্যানেলে যুক্ত হোন:"
 
+    # Unlimited Custom Buttons
     btns = [[InlineKeyboardButton(ch["name"], url=ch["link"])] for ch in await channels_col.find({"type": "inline"}).to_list(100)]
     btns.insert(0, [InlineKeyboardButton("🔥 Open Glow Top", web_app=WebAppInfo(url=f"{WEB_URL}/"))])
 
@@ -245,10 +259,11 @@ async def check_join_cb(c, q):
     await start_cmd(c, FakeMsg(q.from_user))
 
 # ==========================================
-# 5. ADMIN FILE UPLOAD (Fixing Thumbnail)
+# 5. ADMIN FILE UPLOAD (Name -> Photo -> File)
 # ==========================================
 def upload_to_telegraph(file_path):
     try:
+        # Force .jpg extension so the thumbnail always loads on site
         new_path = file_path + ".jpg" if not file_path.endswith(".jpg") else file_path
         if file_path != new_path: os.rename(file_path, new_path)
         with open(new_path, 'rb') as f: res = requests.post('https://telegra.ph/upload', files={'file': ('f.jpg', f, 'image/jpeg')}).json()
@@ -277,6 +292,8 @@ async def handle_admin_photo(c, m):
     except: pass
     
     admin_steps[m.from_user.id]["thumb_url"] = url or "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+    
+    # Premium vs Regular selection
     btns = [[InlineKeyboardButton("💎 Premium Video", callback_data="ftype_prem")], [InlineKeyboardButton("👤 Regular Video", callback_data="ftype_reg")]]
     await msg.edit_text("ভিডিওটি কি প্রিমিয়াম নাকি রেগুলার?", reply_markup=InlineKeyboardMarkup(btns))
 
@@ -311,7 +328,7 @@ async def cmd_delall(c, m):
     await get_db(); await files_col.delete_many({}); await m.reply("✅ সকল ফাইল ডিলিট করা হয়েছে!")
 
 # ==========================================
-# 6. ALL OTHER ADMIN COMMANDS
+# 6. ALL OTHER ADMIN SETTING COMMANDS
 # ==========================================
 @app.on_message(filters.command("prstep") & filters.user(ADMIN_ID))
 async def cmd_prstep(c, m):
@@ -472,7 +489,7 @@ async def cmd_allred(c, m):
     await m.reply(f"✅ Code: `{code}`\nLimit: {lim}\nCoins: {rng[0]}-{rng[1]}")
 
 # ==========================================
-# 7. FLASK WEB API
+# 7. FLASK WEB API (Ads, Redeem, Configs)
 # ==========================================
 @web.route('/api/get_ad/<int:user_id>/<file_id>')
 def get_ad_api(user_id, file_id):
@@ -480,7 +497,7 @@ def get_ad_api(user_id, file_id):
     user = sync_db["users"].find_one({"_id": user_id})
     file_data = sync_db["files"].find_one({"_id": file_id})
     
-    # Premium Users skip Ads
+    # Premium Users skip Ads completely
     if user and user.get("premium_until") and user["premium_until"] > datetime.now(): return jsonify({"show_ad": False})
         
     if config.get("ads_on", True):
@@ -536,8 +553,6 @@ def get_user(user_id):
         now = datetime.now()
         if user["premium_until"] > now:
             is_prem = True
-            
-            # মেম্বারশিপ কতদিন পর শেষ হবে তার ক্যালকুলেশন
             sec = int((user["premium_until"] - now).total_seconds())
             y, sec = divmod(sec, 31536000)
             mo, sec = divmod(sec, 2592000)
@@ -559,7 +574,7 @@ def get_user(user_id):
     return jsonify({"balance": user.get("balance", 0) if user else 0, "is_premium": is_prem, "expiry": expiry_str})
 
 # ==========================================
-# 8. HTML UI (EXACT GLOW TOP DESIGN & LOGIC)
+# 8. EXPANDED HTML UI (GLOW TOP DESIGN & LOGIC)
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -574,63 +589,333 @@ HTML_TEMPLATE = """
         
         body { 
             background: linear-gradient(180deg, #18091c 0%, #081016 100%); 
-            color: #fff; font-family: 'Hind Siliguri', sans-serif; 
-            margin: 0; padding-bottom: 90px; min-height: 100vh;
+            color: #fff; 
+            font-family: 'Hind Siliguri', sans-serif; 
+            margin: 0; 
+            padding-bottom: 90px; 
+            min-height: 100vh; 
         }
+        
         * { box-sizing: border-box; }
         
         /* HEADER */
-        .header { display: flex; justify-content: space-between; padding: 15px 20px; align-items: center; }
-        .logo { font-size: 20px; font-weight: bold; }
-        .coin-pill { background: #ffb703; color: #000; padding: 5px 12px; border-radius: 20px; font-weight: bold; font-size: 14px;}
-        .prem-badge { background: #c72cff; padding: 2px 8px; border-radius: 10px; font-size: 10px; display:none; margin-left: 5px;}
+        .header { 
+            display: flex; 
+            justify-content: space-between; 
+            padding: 15px 20px; 
+            align-items: center; 
+        }
+        
+        .logo { 
+            font-size: 20px; 
+            font-weight: bold; 
+        }
+        
+        .coin-pill { 
+            background: #ffb703; 
+            color: #000; 
+            padding: 5px 12px; 
+            border-radius: 20px; 
+            font-weight: bold; 
+            font-size: 14px;
+        }
+        
+        .prem-badge { 
+            background: #c72cff; 
+            padding: 2px 8px; 
+            border-radius: 10px; 
+            font-size: 10px; 
+            display:none; 
+            margin-left: 5px;
+        }
         
         /* PAGE & NAV */
-        .page { display: none; padding: 15px; }
-        .page.active { display: block; animation: fadeIn 0.3s ease-in-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .page { 
+            display: none; 
+            padding: 15px; 
+        }
         
-        .bottom-nav { position: fixed; bottom: 0; width: 100%; background: rgba(14,20,30,0.95); display: flex; justify-content: space-around; padding: 10px 0; border-top: 1px solid rgba(255,255,255,0.05); backdrop-filter: blur(10px); z-index:100;}
-        .nav-item { display: flex; flex-direction: column; align-items: center; font-size: 11px; color: #777; cursor: pointer; padding: 5px 15px; border-radius: 12px;}
-        .nav-item.active { color: #fff; background: rgba(255,255,255,0.05); }
-        .nav-item span { font-size: 22px; margin-bottom: 2px; filter: grayscale(100%); }
-        .nav-item.active span { filter: grayscale(0%); }
+        .page.active { 
+            display: block; 
+            animation: fadeIn 0.3s ease-in-out; 
+        }
+        
+        @keyframes fadeIn { 
+            from { opacity: 0; transform: translateY(10px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+        
+        .bottom-nav { 
+            position: fixed; 
+            bottom: 0; 
+            width: 100%; 
+            background: rgba(14,20,30,0.95); 
+            display: flex; 
+            justify-content: space-around; 
+            padding: 10px 0; 
+            border-top: 1px solid rgba(255,255,255,0.05); 
+            backdrop-filter: blur(10px); 
+            z-index: 100;
+        }
+        
+        .nav-item { 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            font-size: 11px; 
+            color: #777; 
+            cursor: pointer; 
+            padding: 5px 15px; 
+            border-radius: 12px;
+        }
+        
+        .nav-item.active { 
+            color: #fff; 
+            background: rgba(255,255,255,0.05); 
+        }
+        
+        .nav-item span { 
+            font-size: 22px; 
+            margin-bottom: 2px; 
+            filter: grayscale(100%); 
+        }
+        
+        .nav-item.active span { 
+            filter: grayscale(0%); 
+        }
 
         /* SEARCH & CATEGORIES */
-        .search-box { width: 100%; padding: 14px 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.4); color: white; outline: none; margin-bottom: 15px; font-size: 15px; font-family: 'Hind Siliguri', sans-serif;}
+        .search-box { 
+            width: 100%; 
+            padding: 14px 20px; 
+            border-radius: 12px; 
+            border: 1px solid rgba(255,255,255,0.1); 
+            background: rgba(0,0,0,0.4); 
+            color: white; 
+            outline: none; 
+            margin-bottom: 15px; 
+            font-size: 15px; 
+            font-family: 'Hind Siliguri', sans-serif;
+        }
         
         /* VIDEO CARDS */
-        .video-card { background: rgba(25,25,35,0.8); border-radius: 12px; margin-bottom: 20px; overflow: hidden; position: relative; border: 1px solid rgba(255,255,255,0.05);}
-        .video-card img { width: 100%; height: 210px; object-fit: cover; }
-        .tag-premium { position: absolute; top: 12px; left: 12px; background: #c72cff; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(199,44,255,0.5);}
-        .play-btn-overlay { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); width: 55px; height: 55px; background: rgba(0,123,255,0.8); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; backdrop-filter: blur(5px); box-shadow: 0 0 15px rgba(0,123,255,0.4);}
-        .play-btn-overlay::after { content: '▶'; color: white; font-size: 22px; margin-left: 4px;}
-        .video-info { padding: 15px; }
+        .video-card { 
+            background: rgba(25,25,35,0.8); 
+            border-radius: 12px; 
+            margin-bottom: 20px; 
+            overflow: hidden; 
+            position: relative; 
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .video-card img { 
+            width: 100%; 
+            height: 210px; 
+            object-fit: cover; 
+        }
+        
+        .tag-premium { 
+            position: absolute; 
+            top: 12px; 
+            left: 12px; 
+            background: #c72cff; 
+            padding: 4px 12px; 
+            border-radius: 15px; 
+            font-size: 11px; 
+            font-weight: bold; 
+            box-shadow: 0 2px 10px rgba(199,44,255,0.5);
+        }
+        
+        .play-btn-overlay { 
+            position: absolute; 
+            top: 40%; 
+            left: 50%; 
+            transform: translate(-50%, -50%); 
+            width: 55px; 
+            height: 55px; 
+            background: rgba(0,123,255,0.8); 
+            border-radius: 50%; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            cursor: pointer; 
+            backdrop-filter: blur(5px); 
+            box-shadow: 0 0 15px rgba(0,123,255,0.4);
+        }
+        
+        .play-btn-overlay::after { 
+            content: '▶'; 
+            color: white; 
+            font-size: 22px; 
+            margin-left: 4px;
+        }
+        
+        .video-info { 
+            padding: 15px; 
+        }
 
         /* PAGINATION */
-        .pagination { display: flex; justify-content: center; gap: 5px; flex-wrap: wrap; margin-top: 15px; }
-        .page-btn { background: rgba(255,255,255,0.1); color: white; border: none; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-weight:bold;}
-        .page-btn.active { background: linear-gradient(90deg, #f02d73, #ff6b6b); }
-        .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pagination { 
+            display: flex; 
+            justify-content: center; 
+            gap: 5px; 
+            flex-wrap: wrap; 
+            margin-top: 15px; 
+        }
+        
+        .page-btn { 
+            background: rgba(255,255,255,0.1); 
+            color: white; 
+            border: none; 
+            padding: 8px 12px; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            font-weight: bold;
+        }
+        
+        .page-btn.active { 
+            background: linear-gradient(90deg, #f02d73, #ff6b6b); 
+        }
+        
+        .page-btn:disabled { 
+            opacity: 0.5; 
+            cursor: not-allowed; 
+        }
 
         /* SETTINGS & PREMIUM */
-        .cat-btn { background: rgba(255,255,255,0.05); padding: 8px 18px; border-radius: 25px; font-size: 13px; cursor: pointer; white-space: nowrap; border: 1px solid rgba(255,255,255,0.1);}
-        .cat-btn.active { background: linear-gradient(90deg, #f02d73, #00d4ff); color: white; border:none; font-weight:bold;}
+        .cat-btn { 
+            background: rgba(255,255,255,0.05); 
+            padding: 8px 18px; 
+            border-radius: 25px; 
+            font-size: 13px; 
+            cursor: pointer; 
+            white-space: nowrap; 
+            border: 1px solid rgba(255,255,255,0.1);
+        }
         
-        .balance-card { background: linear-gradient(135deg, #4b2354, #1b1c29); border-radius: 15px; padding: 25px; text-align: center; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05);}
-        .set-item { display: flex; align-items: center; background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 12px; cursor:pointer;}
-        .set-icon { width: 45px; height: 45px; border-radius: 12px; display: flex; justify-content: center; align-items: center; font-size: 20px; margin-right: 15px;}
+        .cat-btn.active { 
+            background: linear-gradient(90deg, #f02d73, #00d4ff); 
+            color: white; 
+            border: none; 
+            font-weight: bold;
+        }
         
-        .share-banner { background: rgba(0,255,100,0.05); border: 1px solid rgba(0,255,100,0.2); padding: 20px; border-radius: 12px; font-size: 14px; line-height: 1.6; margin-bottom: 25px;}
-        .ref-box { display: flex; background: rgba(255,255,255,0.05); border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 25px; overflow:hidden;}
-        .ref-box input { flex: 1; background: transparent; border: none; color: white; padding: 15px; font-size: 14px; outline:none;}
-        .ref-box button { background: rgba(255,255,255,0.1); color: #00d4ff; border: none; padding: 0 20px; font-weight:bold; cursor:pointer;}
+        .balance-card { 
+            background: linear-gradient(135deg, #4b2354, #1b1c29); 
+            border-radius: 15px; 
+            padding: 25px; 
+            text-align: center; 
+            margin-bottom: 20px; 
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .set-item { 
+            display: flex; 
+            align-items: center; 
+            background: rgba(255,255,255,0.03); 
+            padding: 15px; 
+            border-radius: 12px; 
+            border: 1px solid rgba(255,255,255,0.05); 
+            margin-bottom: 12px; 
+            cursor: pointer;
+        }
+        
+        .set-icon { 
+            width: 45px; 
+            height: 45px; 
+            border-radius: 12px; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            font-size: 20px; 
+            margin-right: 15px;
+        }
+        
+        .share-banner { 
+            background: rgba(0,255,100,0.05); 
+            border: 1px solid rgba(0,255,100,0.2); 
+            padding: 20px; 
+            border-radius: 12px; 
+            font-size: 14px; 
+            line-height: 1.6; 
+            margin-bottom: 25px;
+        }
+        
+        .ref-box { 
+            display: flex; 
+            background: rgba(255,255,255,0.05); 
+            border-radius: 10px; 
+            border: 1px solid rgba(255,255,255,0.1); 
+            margin-bottom: 25px; 
+            overflow: hidden;
+        }
+        
+        .ref-box input { 
+            flex: 1; 
+            background: transparent; 
+            border: none; 
+            color: white; 
+            padding: 15px; 
+            font-size: 14px; 
+            outline: none;
+        }
+        
+        .ref-box button { 
+            background: rgba(255,255,255,0.1); 
+            color: #00d4ff; 
+            border: none; 
+            padding: 0 20px; 
+            font-weight: bold; 
+            cursor: pointer;
+        }
 
         /* BUTTONS & MODALS */
-        .btn-main { width: 100%; background: linear-gradient(90deg, #f02d73, #ff6b6b); padding: 16px; border-radius: 12px; font-weight: bold; border: none; color: white; font-size: 16px; cursor: pointer; font-family: 'Hind Siliguri', sans-serif;}
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(8,16,22,0.95); z-index: 999; justify-content: center; align-items: center; backdrop-filter: blur(5px);}
-        .modal-box { background: rgba(30, 30, 45, 0.95); padding: 30px 25px; border-radius: 20px; text-align: center; width: 90%; max-width: 400px; border: 1px solid rgba(255,255,255,0.05);}
-        .alert-box { background: rgba(255,0,0,0.1); border: 1px solid #ff4d4d; color: #ffb3b3; padding: 15px; border-radius: 12px; font-size: 13px; margin: 15px 0;}
+        .btn-main { 
+            width: 100%; 
+            background: linear-gradient(90deg, #f02d73, #ff6b6b); 
+            padding: 16px; 
+            border-radius: 12px; 
+            font-weight: bold; 
+            border: none; 
+            color: white; 
+            font-size: 16px; 
+            cursor: pointer; 
+            font-family: 'Hind Siliguri', sans-serif;
+        }
+        
+        .modal-overlay { 
+            display: none; 
+            position: fixed; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            background: rgba(8,16,22,0.95); 
+            z-index: 999; 
+            justify-content: center; 
+            align-items: center; 
+            backdrop-filter: blur(5px);
+        }
+        
+        .modal-box { 
+            background: rgba(30, 30, 45, 0.95); 
+            padding: 30px 25px; 
+            border-radius: 20px; 
+            text-align: center; 
+            width: 90%; 
+            max-width: 400px; 
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .alert-box { 
+            background: rgba(255,0,0,0.1); 
+            border: 1px solid #ff4d4d; 
+            color: #ffb3b3; 
+            padding: 15px; 
+            border-radius: 12px; 
+            font-size: 13px; 
+            margin: 15px 0;
+        }
     </style>
 </head>
 <body>
@@ -735,12 +1020,18 @@ HTML_TEMPLATE = """
         
         <div class="set-item" onclick="switchNav('coupon')">
             <div class="set-icon" style="background: linear-gradient(135deg, #a18cd1, #fbc2eb);">🎟</div>
-            <div><b style="display:block; font-size:16px;">কুপন কোড (Coupon)</b><span style="color:#aaa; font-size:12px;">কোড রিডিম করে ফ্রি কয়েন নিন</span></div>
+            <div>
+                <b style="display:block; font-size:16px;">কুপন কোড (Coupon)</b>
+                <span style="color:#aaa; font-size:12px;">কোড রিডিম করে ফ্রি কয়েন নিন</span>
+            </div>
         </div>
         
         <div class="set-item" onclick="switchNav('share')">
             <div class="set-icon" style="background: linear-gradient(135deg, #ffecd2, #fcb69f);">🎁</div>
-            <div><b style="display:block; font-size:16px;">বন্ধুকে শেয়ার করুন (Share)</b><span style="color:#aaa; font-size:12px;">ইনভাইট করে ফ্রি কয়েন জিতুন</span></div>
+            <div>
+                <b style="display:block; font-size:16px;">বন্ধুকে শেয়ার করুন (Share)</b>
+                <span style="color:#aaa; font-size:12px;">ইনভাইট করে ফ্রি কয়েন জিতুন</span>
+            </div>
         </div>
     </div>
 
@@ -752,6 +1043,7 @@ HTML_TEMPLATE = """
             <button class="btn-main" style="width:auto; margin:0; padding:0 25px;" onclick="redeemCoupon()">Redeem</button>
         </div>
     </div>
+    
     <div id="page-share" class="page">
         <h2 style="margin-top:0;">🎁 বন্ধুকে শেয়ার করুন (Share)</h2>
         <div class="share-banner">🥳 বন্ধু আপনার লিংক দিয়ে স্টার্ট করলেই <b style="color:#ffb703;">বোনাস</b> পাবেন!</div>
@@ -769,6 +1061,7 @@ HTML_TEMPLATE = """
         <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Setting</div>
     </div>
 
+    <!-- JAVASCRIPT LOGIC -->
     <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
@@ -780,6 +1073,7 @@ HTML_TEMPLATE = """
         document.getElementById('ref-link').value = `https://t.me/${botUsername}?start=${userId}`;
         
         let userBalance = 0;
+        
         async function loadUser() {
             let res = await fetch('/api/user/' + userId);
             let data = await res.json();
@@ -791,30 +1085,30 @@ HTML_TEMPLATE = """
             // Premium Status Condition Logic
             if(data.is_premium) {
                 document.getElementById('prem-badge').style.display = 'inline-block';
-                
                 let memBox = document.getElementById('mem-status');
                 memBox.innerHTML = '💎 Premium Member';
                 memBox.style.background = 'linear-gradient(90deg, #c72cff, #ff007f)';
                 memBox.style.color = '#fff';
-                
                 let expBox = document.getElementById('mem-expiry');
                 expBox.style.display = 'block';
                 expBox.innerText = "মেয়াদ: " + data.expiry + " পর রেগুলার হয়ে যাবে";
             } else {
                 document.getElementById('prem-badge').style.display = 'none';
-                
                 let memBox = document.getElementById('mem-status');
                 memBox.innerHTML = '👤 Regular Member';
                 memBox.style.background = 'rgba(255,255,255,0.1)';
                 memBox.style.color = '#fff';
-                
                 document.getElementById('mem-expiry').style.display = 'none';
             }
         }
         loadUser();
 
         if(!localStorage.getItem('ageVerified')) { document.getElementById('age-modal').style.display = 'flex'; }
-        function confirmAge() { localStorage.setItem('ageVerified', 'true'); document.getElementById('age-modal').style.display = 'none'; }
+        
+        function confirmAge() { 
+            localStorage.setItem('ageVerified', 'true'); 
+            document.getElementById('age-modal').style.display = 'none'; 
+        }
 
         function switchNav(pageId, element=null) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -870,6 +1164,7 @@ HTML_TEMPLATE = """
             
             let html = "";
             if(pageFiles.length === 0) html = "<p style='text-align:center; color:#666;'>No videos found!</p>";
+            
             pageFiles.forEach(f => {
                 html += `<div class="video-card">
                     <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
@@ -885,12 +1180,17 @@ HTML_TEMPLATE = """
             renderPagination(tab, filtered.length);
         }
 
-        function handleSearch(tab) { state[tab].q = document.getElementById(`search-bar${tab==='prem'?'-prem':''}`).value.toLowerCase(); state[tab].p = 1; renderList(tab); }
+        function handleSearch(tab) { 
+            state[tab].q = document.getElementById(`search-bar${tab==='prem'?'-prem':''}`).value.toLowerCase(); 
+            state[tab].p = 1; 
+            renderList(tab); 
+        }
         function chgP(tab, dir) { state[tab].p += dir; renderList(tab); }
         function setP(tab, num) { state[tab].p = num; renderList(tab); }
         function setLim(tab, lim) { state[tab].lim = lim; state[tab].p = 1; renderList(tab); }
 
-        renderList('home'); renderList('prem');
+        renderList('home'); 
+        renderList('prem');
 
         // --- ADS ANTI-CHEAT TIMER & STEPS LOGIC ---
         let currentDeepLink = "";
@@ -969,7 +1269,10 @@ HTML_TEMPLATE = """
             let res = await fetch('/api/redeem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, code: code }) });
             let data = await res.json();
             tg.showAlert(data.msg);
-            if(data.status === 'success') { loadUser(); document.getElementById('coupon-input').value = ""; }
+            if(data.status === 'success') { 
+                loadUser(); 
+                document.getElementById('coupon-input').value = ""; 
+            }
         }
         
         async function buyWithCoin(pkgId, cost) {
@@ -982,8 +1285,17 @@ HTML_TEMPLATE = """
             }
         }
 
-        function copyRef() { let c = document.getElementById("ref-link"); c.select(); navigator.clipboard.writeText(c.value); tg.showAlert("✅ রেফার লিংক কপি হয়েছে!"); }
-        function reqBuy() { tg.openTelegramLink(`https://t.me/${adminUsername}`); tg.showAlert("✅ পেমেন্ট করতে অ্যাডমিনকে ইনবক্সে মেসেজ দিন।"); }
+        function copyRef() { 
+            let c = document.getElementById("ref-link"); 
+            c.select(); 
+            navigator.clipboard.writeText(c.value); 
+            tg.showAlert("✅ রেফার লিংক কপি হয়েছে!"); 
+        }
+        
+        function reqBuy() { 
+            tg.openTelegramLink(`https://t.me/${adminUsername}`); 
+            tg.showAlert("✅ পেমেন্ট করতে অ্যাডমিনকে ইনবক্সে মেসেজ দিন।"); 
+        }
     </script>
 </body>
 </html>
@@ -996,12 +1308,13 @@ def home():
     return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=sync_db["config"].find_one({"_id": "settings"}) or {})
 
 # ==========================================
-# 9. RUN LOGIC
+# 9. RUN LOGIC (SAFE & ROBUST)
 # ==========================================
 def run_flask(): web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
 
 async def main_bot():
-    await get_db(); await get_config()
+    await get_db()
+    await get_config()
     await app.start()
     print("✅ Bot Started Successfully!")
     asyncio.create_task(background_tasks())
@@ -1012,7 +1325,11 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     while True:
         try:
-            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            # We explicitly start loop logic from here
             loop.run_until_complete(main_bot())
-        except FloodWait as e: print(f"⚠️ Rate Limit: Waiting {e.value}s..."); time.sleep(e.value)
-        except Exception as e: print(f"❌ Error: {e}"); time.sleep(5)
+        except FloodWait as e: 
+            print(f"⚠️ Rate Limit: Waiting {e.value}s...")
+            time.sleep(e.value)
+        except Exception as e: 
+            print(f"❌ Error: {e}")
+            time.sleep(5)
