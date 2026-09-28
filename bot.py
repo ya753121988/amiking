@@ -1,10 +1,8 @@
-import os, sys, asyncio, threading, random, string, time, requests, json 
+import os, sys, asyncio, threading, random, string, time, requests, json, base64
 from datetime import datetime, timedelta
-import base64 # <-- NEW: For Image processing
 
 # ==========================================
 # 🛑 PYROGRAM PYTHON 3.14 FIX 🛑
-# Pyrogram ইমপোর্ট করার আগে Event Loop সেট করতে হবে
 # ==========================================
 loop = asyncio.new_event_loop() 
 asyncio.set_event_loop(loop)
@@ -75,14 +73,12 @@ def get_expiry_str(expiry_date):
     now = datetime.now() 
     if expiry_date <= now: return None 
     sec = int((expiry_date - now).total_seconds())
-
     y, sec = divmod(sec, 31536000)
     mo, sec = divmod(sec, 2592000)
     w, sec = divmod(sec, 604800)
     d, sec = divmod(sec, 86400)
     h, sec = divmod(sec, 3600)
     m, sec = divmod(sec, 60)
-
     res = []
     if y: res.append(f"{y} বছর/Years")
     if mo: res.append(f"{mo} মাস/Months")
@@ -93,7 +89,6 @@ def get_expiry_str(expiry_date):
     if sec or not res: res.append(f"{sec} সেকেন্ড/Secs")
     return " ".join(res)
 
-# --- Keep Alive ---
 def keep_alive(): 
     while True: 
         try: 
@@ -174,20 +169,34 @@ async def start_cmd(client, message):
     args = message.text.split() 
     config = await get_config()
 
+    # SHARE LINK LOGIC: Extracting ref_id and file_id properly for Income
+    ref_by = None
+    pf = None
+    if len(args) > 1:
+        val = args[1]
+        if val.isdigit():
+            ref_by = int(val)
+        elif val.startswith("file_"):
+            pf = val.replace("file_", "")
+        elif val.startswith("ref") and "file" in val:
+            # Example payload from share link: ref12345fileABCDE
+            try:
+                parts = val.replace("ref", "").split("file")
+                ref_by = int(parts[0])
+                pf = parts[1]
+            except: pass
+
     user = await users_col.find_one({"_id": uid})
     if not user:
-        # NEW: Added history array for new users
         await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": []})
-        if len(args) > 1 and args[1].isdigit() and int(args[1]) != uid:
-            ref_by = int(args[1])
+        if ref_by and ref_by != uid:
             if config.get("ref_on", True):
                 await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
                 try: await client.send_message(ref_by, f"🎉 আপনার রেফারে একজন জয়েন করেছে! / Someone joined using your refer link! +{config.get('ref_coin', 10)} Coins")
                 except: pass
         user = await users_col.find_one({"_id": uid})
 
-    if len(args) > 1 and args[1].startswith("file_"):
-        pf = args[1].replace("file_", "")
+    if pf:
         await users_col.update_one({"_id": uid}, {"$set": {"pending_file": pf}})
         user["pending_file"] = pf
 
@@ -257,17 +266,6 @@ async def check_join_cb(c, q):
 # ==========================================
 # 5. ADMIN FILE UPLOAD
 # ==========================================
-def upload_to_telegraph(file_path): 
-    try: 
-        # Force .jpg extension so Telegraph accepts any format (png/webp/heic) sent from Telegram
-        new_path = file_path + ".jpg"
-        os.rename(file_path, new_path)
-        with open(new_path, 'rb') as f: 
-            res = requests.post('https://telegra.ph/upload', files={'file': ('f.jpg', f, 'image/jpeg')}).json() 
-        return "https://telegra.ph" + res[0]['src'] 
-    except Exception as e: 
-        print(e); return None
-
 @app.on_message(filters.command("addfile") & filters.user(ADMIN_ID)) 
 async def cmd_addfile(c, m): 
     admin_steps[m.from_user.id] = {"step": "name"} 
@@ -284,24 +282,21 @@ async def handle_admin_name(c, m):
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("thumb")) 
 async def handle_admin_photo(c, m): 
-    msg = await m.reply("⏳ ছবি প্রসেস হচ্ছে এবং ডাটাবেসে সেভ হচ্ছে... / Processing image to MongoDB...") 
+    msg = await m.reply("⏳ ছবি ডাটাবেসে সেভ করা হচ্ছে... / Saving image to Database...") 
     path = await m.download() 
     
-    # NEW LOGIC: Convert Image to Base64 (Supports all formats, saves to DB directly)
+    # Store Image Directly to MongoDB (Supports Any format via Base64)
     try:
-        with open(path, "rb") as img_file:
-            b64_string = base64.b64encode(img_file.read()).decode('utf-8')
+        with open(path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
         ext = path.split('.')[-1].lower() if '.' in path else 'jpg'
-        mime = f"image/{ext}" if ext in ['png', 'webp', 'gif', 'jpeg', 'heic', 'pdf'] else "image/jpeg"
-        url = f"data:{mime};base64,{b64_string}"
+        mime = f"image/{ext}" if ext in ['png', 'webp', 'gif', 'jpeg', 'jpg', 'heic'] else "image/jpeg"
+        base64_url = f"data:{mime};base64,{encoded_string}"
+        admin_steps[m.from_user.id]["thumb_url"] = base64_url
+        os.remove(path)
     except Exception as e:
-        print("Image save error:", e)
-        url = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
-        
-    try: os.remove(path) 
-    except: pass
-
-    admin_steps[m.from_user.id]["thumb_url"] = url
+        print("Image processing error:", e)
+        admin_steps[m.from_user.id]["thumb_url"] = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
 
     btns = [[InlineKeyboardButton("💎 Premium Video", callback_data="ftype_prem")], [InlineKeyboardButton("👤 Regular Video", callback_data="ftype_reg")]]
     await msg.edit_text("ভিডিওটি কি প্রিমিয়াম নাকি রেগুলার? / Is it Premium or Regular?", reply_markup=InlineKeyboardMarkup(btns))
@@ -318,8 +313,7 @@ async def handle_admin_file(c, m):
     msg = await m.reply("⏳ ফাইল সেভ করা হচ্ছে... / Saving file...") 
     short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) 
     f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id) 
-    # NEW: Added likes and comments fields
-    await files_col.insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": 0, "comments": [] }) 
+    await files_col.insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": [], "comments": [] }) 
     del admin_steps[m.from_user.id] 
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: {short_id}")
 
@@ -550,7 +544,6 @@ def buy_with_coin():
     except: pass
     return jsonify({"status": "success", "msg": "✅ Premium Purchased Successfully!"})
 
-# NEW: API to handle likes, comments, and history
 @web.route('/api/action', methods=['POST'])
 def handle_actions():
     data = request.json
@@ -558,7 +551,7 @@ def handle_actions():
     if action == "history":
         sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"history": f_id}})
     elif action == "like":
-        sync_db["files"].update_one({"_id": f_id}, {"$inc": {"likes": 1}})
+        sync_db["files"].update_one({"_id": f_id}, {"$addToSet": {"likes": uid}})
     elif action == "comment":
         comment = {"uid": uid, "text": data.get("text"), "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
         sync_db["files"].update_one({"_id": f_id}, {"$push": {"comments": comment}})
@@ -587,11 +580,10 @@ def get_user(user_id):
             if sec or not res: res.append(f"{sec} সেকেন্ড/s")
             expiry_str = " ".join(res)
 
-    # NEW: Returned user history in API response
     return jsonify({"balance": user.get("balance", 0) if user else 0, "is_premium": is_prem, "expiry": expiry_str, "history": user.get("history", []) if user else []})
 
 # ==========================================
-# 8. EXPANDED HTML UI (GLOW TOP DESIGN & LOGIC)
+# 8. HTML UI & LOGIC 
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -602,361 +594,26 @@ HTML_TEMPLATE = """
     <style>
         body { 
             background: linear-gradient(180deg, #18091c 0%, #081016 100%); 
-            color: #fff; 
-            font-family: 'Hind Siliguri', sans-serif; 
-            margin: 0; 
-            padding-bottom: 90px; 
-            min-height: 100vh; 
+            color: #fff; font-family: 'Hind Siliguri', sans-serif; 
+            margin: 0; padding-bottom: 90px; min-height: 100vh; 
         }
-        
         * { box-sizing: border-box; }
+        .header { display: flex; justify-content: space-between; padding: 15px 20px; align-items: center; }
+        .logo { font-size: 20px; font-weight: bold; }
+        .coin-pill { background: #ffb703; color: #000; padding: 5px 12px; border-radius: 20px; font-weight: bold; font-size: 14px; }
+        .lang-btn { background: rgba(255,255,255,0.1); color: white; border: 1px solid #fff; padding: 4px 10px; border-radius: 12px; font-size: 12px; cursor: pointer; margin-right: 10px; }
+        .prem-badge { background: #c72cff; padding: 2px 8px; border-radius: 10px; font-size: 10px; display:none; margin-left: 5px; }
+        .page { display: none; padding: 15px; }
+        .page.active { display: block; animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         
-        /* HEADER */
-        .header { 
-            display: flex; 
-            justify-content: space-between; 
-            padding: 15px 20px; 
-            align-items: center; 
-        }
-        
-        .logo { 
-            font-size: 20px; 
-            font-weight: bold; 
-        }
-        
-        .coin-pill { 
-            background: #ffb703; 
-            color: #000; 
-            padding: 5px 12px; 
-            border-radius: 20px; 
-            font-weight: bold; 
-            font-size: 14px;
-        }
+        .bottom-nav { position: fixed; bottom: 0; width: 100%; background: rgba(14,20,30,0.95); display: flex; justify-content: space-around; padding: 10px 0; border-top: 1px solid rgba(255,255,255,0.05); backdrop-filter: blur(10px); z-index: 100; overflow-x: auto; }
+        .nav-item { display: flex; flex-direction: column; align-items: center; font-size: 11px; color: #777; cursor: pointer; padding: 5px 10px; border-radius: 12px; min-width: 60px; }
+        .nav-item.active { color: #fff; background: rgba(255,255,255,0.05); }
+        .nav-item span { font-size: 22px; margin-bottom: 2px; filter: grayscale(100%); }
+        .nav-item.active span { filter: grayscale(0%); }
 
-        .lang-btn {
-            background: rgba(255,255,255,0.1);
-            color: white;
-            border: 1px solid #fff;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 12px;
-            cursor: pointer;
-            margin-right: 10px;
-        }
-        
-        .prem-badge { 
-            background: #c72cff; 
-            padding: 2px 8px; 
-            border-radius: 10px; 
-            font-size: 10px; 
-            display:none; 
-            margin-left: 5px;
-        }
-        
-        /* PAGE & NAV */
-        .page { 
-            display: none; 
-            padding: 15px; 
-        }
-        
-        .page.active { 
-            display: block; 
-            animation: fadeIn 0.3s ease-in-out; 
-        }
-        
-        @keyframes fadeIn { 
-            from { opacity: 0; transform: translateY(10px); } 
-            to { opacity: 1; transform: translateY(0); } 
-        }
-        
-        .bottom-nav { 
-            position: fixed; 
-            bottom: 0; 
-            width: 100%; 
-            background: rgba(14,20,30,0.95); 
-            display: flex; 
-            justify-content: space-around; 
-            padding: 10px 0; 
-            border-top: 1px solid rgba(255,255,255,0.05); 
-            backdrop-filter: blur(10px); 
-            z-index: 100;
-        }
-        
-        .nav-item { 
-            display: flex; 
-            flex-direction: column; 
-            align-items: center; 
-            font-size: 11px; 
-            color: #777; 
-            cursor: pointer; 
-            padding: 5px 15px; 
-            border-radius: 12px;
-        }
-        
-        .nav-item.active { 
-            color: #fff; 
-            background: rgba(255,255,255,0.05); 
-        }
-        
-        .nav-item span { 
-            font-size: 22px; 
-            margin-bottom: 2px; 
-            filter: grayscale(100%); 
-        }
-        
-        .nav-item.active span { 
-            filter: grayscale(0%); 
-        }
-
-        /* SEARCH & CATEGORIES */
-        .search-box { 
-            width: 100%; 
-            padding: 14px 20px; 
-            border-radius: 12px; 
-            border: 1px solid rgba(255,255,255,0.1); 
-            background: rgba(0,0,0,0.4); 
-            color: white; 
-            outline: none; 
-            margin-bottom: 15px; 
-            font-size: 15px; 
-            font-family: 'Hind Siliguri', sans-serif;
-        }
-        
-        /* VIDEO CARDS */
-        .video-card { 
-            background: rgba(25,25,35,0.8); 
-            border-radius: 12px; 
-            margin-bottom: 20px; 
-            overflow: hidden; 
-            position: relative; 
-            border: 1px solid rgba(255,255,255,0.05);
-        }
-        
-        .video-card img { 
-            width: 100%; 
-            height: 210px; 
-            object-fit: cover; 
-        }
-        
-        .tag-premium { 
-            position: absolute; 
-            top: 12px; 
-            left: 12px; 
-            background: #c72cff; 
-            padding: 4px 12px; 
-            border-radius: 15px; 
-            font-size: 11px; 
-            font-weight: bold; 
-            box-shadow: 0 2px 10px rgba(199,44,255,0.5);
-        }
-
-        .tag-regular { 
-            position: absolute; 
-            top: 12px; 
-            left: 12px; 
-            background: #00d4ff; 
-            color: black;
-            padding: 4px 12px; 
-            border-radius: 15px; 
-            font-size: 11px; 
-            font-weight: bold; 
-            box-shadow: 0 2px 10px rgba(0,212,255,0.5);
-        }
-        
-        .play-btn-overlay { 
-            position: absolute; 
-            top: 40%; 
-            left: 50%; 
-            transform: translate(-50%, -50%); 
-            width: 55px; 
-            height: 55px; 
-            background: rgba(0,123,255,0.8); 
-            border-radius: 50%; 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-            cursor: pointer; 
-            backdrop-filter: blur(5px); 
-            box-shadow: 0 0 15px rgba(0,123,255,0.4);
-        }
-        
-        .play-btn-overlay::after { 
-            content: '▶'; 
-            color: white; 
-            font-size: 22px; 
-            margin-left: 4px;
-        }
-        
-        .video-info { 
-            padding: 15px; 
-        }
-
-        /* PAGINATION */
-        .pagination { 
-            display: flex; 
-            justify-content: center; 
-            gap: 5px; 
-            flex-wrap: wrap; 
-            margin-top: 15px; 
-        }
-        
-        .page-btn { 
-            background: rgba(255,255,255,0.1); 
-            color: white; 
-            border: none; 
-            padding: 8px 12px; 
-            border-radius: 8px; 
-            cursor: pointer; 
-            font-weight: bold;
-        }
-        
-        .page-btn.active { 
-            background: linear-gradient(90deg, #f02d73, #ff6b6b); 
-        }
-        
-        .page-btn:disabled { 
-            opacity: 0.5; 
-            cursor: not-allowed; 
-        }
-
-        /* SETTINGS & PREMIUM */
-        .cat-btn { 
-            background: rgba(255,255,255,0.05); 
-            padding: 8px 18px; 
-            border-radius: 25px; 
-            font-size: 13px; 
-            cursor: pointer; 
-            white-space: nowrap; 
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-        
-        .cat-btn.active { 
-            background: linear-gradient(90deg, #f02d73, #00d4ff); 
-            color: white; 
-            border: none; 
-            font-weight: bold;
-        }
-        
-        .balance-card { 
-            background: linear-gradient(135deg, #4b2354, #1b1c29); 
-            border-radius: 15px; 
-            padding: 25px; 
-            text-align: center; 
-            margin-bottom: 20px; 
-            border: 1px solid rgba(255,255,255,0.05);
-        }
-        
-        .set-item { 
-            display: flex; 
-            align-items: center; 
-            background: rgba(255,255,255,0.03); 
-            padding: 15px; 
-            border-radius: 12px; 
-            border: 1px solid rgba(255,255,255,0.05); 
-            margin-bottom: 12px; 
-            cursor: pointer;
-        }
-        
-        .set-icon { 
-            width: 45px; 
-            height: 45px; 
-            border-radius: 12px; 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-            font-size: 20px; 
-            margin-right: 15px;
-        }
-        
-        .share-banner { 
-            background: rgba(0,255,100,0.05); 
-            border: 1px solid rgba(0,255,100,0.2); 
-            padding: 20px; 
-            border-radius: 12px; 
-            font-size: 14px; 
-            line-height: 1.6; 
-            margin-bottom: 25px;
-        }
-        
-        .ref-box { 
-            display: flex; 
-            background: rgba(255,255,255,0.05); 
-            border-radius: 10px; 
-            border: 1px solid rgba(255,255,255,0.1); 
-            margin-bottom: 25px; 
-            overflow: hidden;
-        }
-        
-        .ref-box input { 
-            flex: 1; 
-            background: transparent; 
-            border: none; 
-            color: white; 
-            padding: 15px; 
-            font-size: 14px; 
-            outline: none;
-        }
-        
-        .ref-box button { 
-            background: rgba(255,255,255,0.1); 
-            color: #00d4ff; 
-            border: none; 
-            padding: 0 20px; 
-            font-weight: bold; 
-            cursor: pointer;
-        }
-
-        /* BUTTONS & MODALS */
-        .btn-main { 
-            width: 100%; 
-            background: linear-gradient(90deg, #f02d73, #ff6b6b); 
-            padding: 16px; 
-            border-radius: 12px; 
-            font-weight: bold; 
-            border: none; 
-            color: white; 
-            font-size: 16px; 
-            cursor: pointer; 
-            font-family: 'Hind Siliguri', sans-serif;
-        }
-        
-        .modal-overlay { 
-            display: none; 
-            position: fixed; 
-            top: 0; 
-            left: 0; 
-            width: 100%; 
-            height: 100%; 
-            background: rgba(8,16,22,0.98); 
-            z-index: 9999; 
-            justify-content: center; 
-            align-items: center; 
-            backdrop-filter: blur(5px);
-        }
-        
-        .modal-box { 
-            background: rgba(30, 30, 45, 0.95); 
-            padding: 30px 25px; 
-            border-radius: 20px; 
-            text-align: center; 
-            width: 90%; 
-            max-width: 400px; 
-            border: 1px solid rgba(255,255,255,0.05);
-        }
-        
-        .alert-box { 
-            background: rgba(255,0,0,0.1); 
-            border: 1px solid #ff4d4d; 
-            color: #ffb3b3; 
-            padding: 15px; 
-            border-radius: 12px; 
-            font-size: 13px; 
-            margin: 15px 0;
-        }
-
-        .lang-en { display: none; }
-
-        /* NEW FEATURES CSS (Slider, History, Like, Comment, Share) */
+        .search-box { width: 100%; padding: 14px 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.4); color: white; outline: none; margin-bottom: 15px; font-size: 15px; }
         .slider-title { font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #ffb703; }
         .slider-container { display: flex; overflow-x: auto; gap: 12px; padding-bottom: 10px; margin-bottom: 20px; scrollbar-width: none; }
         .slider-container::-webkit-scrollbar { display: none; }
@@ -965,69 +622,78 @@ HTML_TEMPLATE = """
         .slider-card .s-title { font-size: 12px; padding: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .slider-play { position: absolute; top: 25%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 40px; background: rgba(0,123,255,0.8); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; box-shadow: 0 0 10px rgba(0,123,255,0.5); }
         .slider-play::after { content: '▶'; color: white; font-size: 16px; margin-left: 3px; }
+
+        .video-card { background: rgba(25,25,35,0.8); border-radius: 12px; margin-bottom: 20px; overflow: hidden; position: relative; border: 1px solid rgba(255,255,255,0.05); }
+        .video-card img { width: 100%; height: 210px; object-fit: cover; }
+        .tag-premium { position: absolute; top: 12px; left: 12px; background: #c72cff; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(199,44,255,0.5); }
+        .tag-regular { position: absolute; top: 12px; left: 12px; background: #00d4ff; color: black; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(0,212,255,0.5); }
+        .play-btn-overlay { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); width: 55px; height: 55px; background: rgba(0,123,255,0.8); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; backdrop-filter: blur(5px); box-shadow: 0 0 15px rgba(0,123,255,0.4); }
+        .play-btn-overlay::after { content: '▶'; color: white; font-size: 22px; margin-left: 4px; }
+        .video-info { padding: 15px; }
+        
         .video-actions { display: flex; justify-content: space-between; padding: 10px 15px; border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.2); }
-        .video-actions button { background: rgba(255,255,255,0.08); border: none; color: white; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 12px; display:flex; align-items:center; gap:5px; }
+        .video-actions button { background: rgba(255,255,255,0.08); border: none; color: white; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 12px; display:flex; align-items:center; gap:5px; transition: 0.2s; }
+
+        .pagination { display: flex; justify-content: center; gap: 5px; flex-wrap: wrap; margin-top: 15px; }
+        .page-btn { background: rgba(255,255,255,0.1); color: white; border: none; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        .page-btn.active { background: linear-gradient(90deg, #f02d73, #ff6b6b); }
+        .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .cat-btn { background: rgba(255,255,255,0.05); padding: 8px 18px; border-radius: 25px; font-size: 13px; cursor: pointer; white-space: nowrap; border: 1px solid rgba(255,255,255,0.1); }
+        .cat-btn.active { background: linear-gradient(90deg, #f02d73, #00d4ff); color: white; border: none; font-weight: bold; }
+        .balance-card { background: linear-gradient(135deg, #4b2354, #1b1c29); border-radius: 15px; padding: 25px; text-align: center; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05); }
+        .set-item { display: flex; align-items: center; background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 12px; cursor: pointer; }
+        .set-icon { width: 45px; height: 45px; border-radius: 12px; display: flex; justify-content: center; align-items: center; font-size: 20px; margin-right: 15px; }
+        .share-banner { background: rgba(0,255,100,0.05); border: 1px solid rgba(0,255,100,0.2); padding: 20px; border-radius: 12px; font-size: 14px; line-height: 1.6; margin-bottom: 25px; }
+        .ref-box { display: flex; background: rgba(255,255,255,0.05); border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 25px; overflow: hidden; }
+        .ref-box input { flex: 1; background: transparent; border: none; color: white; padding: 15px; font-size: 14px; outline: none; }
+        .ref-box button { background: rgba(255,255,255,0.1); color: #00d4ff; border: none; padding: 0 20px; font-weight: bold; cursor: pointer; }
+
+        .btn-main { width: 100%; background: linear-gradient(90deg, #f02d73, #ff6b6b); padding: 16px; border-radius: 12px; font-weight: bold; border: none; color: white; font-size: 16px; cursor: pointer; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(8,16,22,0.98); z-index: 9999; justify-content: center; align-items: center; backdrop-filter: blur(5px); }
+        .modal-box { background: rgba(30, 30, 45, 0.95); padding: 30px 25px; border-radius: 20px; text-align: center; width: 90%; max-width: 400px; border: 1px solid rgba(255,255,255,0.05); position:relative;}
+        .close-btn { position: absolute; top:10px; right:15px; background:transparent; border:none; color:white; font-size:20px; cursor:pointer;}
+        .alert-box { background: rgba(255,0,0,0.1); border: 1px solid #ff4d4d; color: #ffb3b3; padding: 15px; border-radius: 12px; font-size: 13px; margin: 15px 0; }
+        .lang-en { display: none; }
+        
         #comment-list { max-height:200px; overflow-y:auto; text-align:left; margin-bottom:15px; background:rgba(0,0,0,0.3); padding:10px; border-radius:10px;}
         .cmt-item { border-bottom: 1px solid rgba(255,255,255,0.05); padding:5px 0; font-size:13px; }
         .cmt-item:last-child { border:none; }
-        .close-btn { position: absolute; top:10px; right:15px; background:transparent; border:none; color:white; font-size:20px; cursor:pointer;}
     </style>
 </head>
 <body>
 
-<!-- HEADER -->
 <div class="header">
-    <div class="logo">
-        {{ site_name }}
-        <span class="prem-badge" id="prem-badge">VIP</span>
-    </div>
+    <div class="logo">{{ site_name }}<span class="prem-badge" id="prem-badge">VIP</span></div>
     <div style="display:flex; align-items:center;">
         <button class="lang-btn" onclick="toggleLanguage()" id="lang-btn">English</button>
         <div class="coin-pill">🏛 <span id="hdr-balance">0</span></div>
     </div>
 </div>
 
-<!-- STRICT 18+ AGE MODAL (EVERY TIME) -->
 <div id="age-modal" class="modal-overlay">
     <div class="modal-box">
         <div style="font-size: 55px; margin-bottom:10px;">🔞</div>
-        <h2 style="margin-top:0;">
-            <span class="lang-bn">বয়স নিশ্চিতকরণ</span>
-            <span class="lang-en">Age Verification</span>
-        </h2>
+        <h2 style="margin-top:0;"><span class="lang-bn">বয়স নিশ্চিতকরণ</span><span class="lang-en">Age Verification</span></h2>
         <p style="font-size:14px; color:#aaa;">
             <span class="lang-bn">এই ওয়েবসাইটের কনটেন্ট শুধুমাত্র <b style="color:#00d4ff;">১৮ বছর বা তার বেশি বয়সী</b> ব্যবহারকারীদের জন্য প্রযোজ্য।</span>
             <span class="lang-en">This website content is strictly for users who are <b style="color:#00d4ff;">18 years of age or older</b>.</span>
         </p>
-        <div class="alert-box">
-            <span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন না।</span>
-            <span class="lang-en">⚠️ Do not enter if you are under 18.</span>
-        </div>
-        <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; margin-bottom:10px;" onclick="confirmAge()">
-            <span class="lang-bn">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</span>
-            <span class="lang-en">✅ Yes, I am 18+</span>
-        </button>
-        <button class="btn-main" style="background: transparent; border: 1px solid #555; color: #888;" onclick="tg.close()">
-            <span class="lang-bn">❌ না, বের হয়ে যান</span>
-            <span class="lang-en">❌ No, Exit</span>
-        </button>
+        <div class="alert-box"><span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন না।</span><span class="lang-en">⚠️ Do not enter if you are under 18.</span></div>
+        <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; margin-bottom:10px;" onclick="confirmAge()"><span class="lang-bn">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</span><span class="lang-en">✅ Yes, I am 18+</span></button>
+        <button class="btn-main" style="background: transparent; border: 1px solid #555; color: #888;" onclick="tg.close()"><span class="lang-bn">❌ না, বের হয়ে যান</span><span class="lang-en">❌ No, Exit</span></button>
     </div>
 </div>
 
-<!-- AD OVERLAY -->
 <div id="ad-overlay" class="modal-overlay">
     <div class="modal-box" style="background:transparent; border:none; box-shadow:none;">
         <div style="background: rgba(255,255,255,0.1); padding: 5px 15px; border-radius: 20px; display:inline-block; margin-bottom: 15px; font-weight:bold;" id="step-info">Step 1 of 1</div>
         <h1 id="timer-count" style="font-size:90px; color:#f02d73; margin:0;">5</h1>
-        <p style="font-size:16px; color:#aaa;">
-            <span class="lang-bn">অ্যাড দেখার পর ফাইলটি পাবেন (ব্যাক দিলে টাইম রিফ্রেশ হবে না)</span>
-            <span class="lang-en">You will get the file after ad (Timer saves on exit)</span>
-        </p>
+        <p style="font-size:16px; color:#aaa;"><span class="lang-bn">অ্যাড দেখার পর ফাইলটি পাবেন (ব্যাক দিলে টাইম রিফ্রেশ হবে না)</span><span class="lang-en">You will get the file after ad (Timer saves on exit)</span></p>
         <button id="get-file-btn" class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; display:none;">Next Step</button>
     </div>
 </div>
 
-<!-- COMMENTS MODAL -->
 <div id="comment-modal" class="modal-overlay">
     <div class="modal-box">
         <button class="close-btn" onclick="document.getElementById('comment-modal').style.display='none'">✖</button>
@@ -1040,38 +706,31 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- ALL VIDEOS PAGE (HOME) -->
 <div id="page-home" class="page active">
-    <!-- NEW: TOP SLIDER -->
     <div class="slider-title">🔥 <span class="lang-bn">টপ ট্রেন্ডিং ভিডিও</span><span class="lang-en">Top Trending Videos</span></div>
     <div class="slider-container" id="top-slider"></div>
-
     <input type="text" id="search-bar" class="search-box bn-pl" placeholder="🔍 Search all videos..." onkeyup="handleSearch('home')">
     <div id="home-video-list"></div>
     <div class="pagination" id="home-pagination"></div>
 </div>
 
-<!-- REGULAR VIDEOS PAGE -->
 <div id="page-regvids" class="page">
     <input type="text" id="search-bar-reg" class="search-box bn-pl" placeholder="🔍 Search Regular Videos..." onkeyup="handleSearch('reg')">
     <div id="reg-video-list"></div>
     <div class="pagination" id="reg-pagination"></div>
 </div>
 
-<!-- PREMIUM VIDEOS PAGE -->
 <div id="page-premvids" class="page">
     <input type="text" id="search-bar-prem" class="search-box bn-pl" placeholder="🔍 Search Premium Videos..." onkeyup="handleSearch('prem')">
     <div id="prem-video-list"></div>
     <div class="pagination" id="prem-pagination"></div>
 </div>
 
-<!-- HISTORY PAGE -->
 <div id="page-history" class="page">
     <h2 style="margin-top:0;">🕒 <span class="lang-bn">আপনার দেখা ভিডিও</span><span class="lang-en">Watch History</span></h2>
     <div id="history-video-list"></div>
 </div>
 
-<!-- VIP PLANS PAGE -->
 <div id="page-premium" class="page">
     <h2 style="margin-top:0;">VIP / Buy Coins</h2>
     <div style="display:flex; gap:10px; margin-bottom:20px;">
@@ -1087,9 +746,7 @@ HTML_TEMPLATE = """
             <div style="font-size:35px; margin-bottom:10px;">🏛</div>
             <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
             <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }}</p>
-            <button class="btn-main" style="margin:0; padding:12px;" onclick="reqBuy()">
-                <span class="lang-bn">কিনুন</span><span class="lang-en">Buy Now</span>
-            </button>
+            <button class="btn-main" style="margin:0; padding:12px;" onclick="reqBuy()"><span class="lang-bn">কিনুন</span><span class="lang-en">Buy Now</span></button>
         </div>
         {% endfor %}
     </div>
@@ -1101,9 +758,7 @@ HTML_TEMPLATE = """
             <div style="font-size:35px; margin-bottom:10px;">💲</div>
             <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
             <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }}</p>
-            <button class="btn-main" style="margin:0; padding:12px; background:linear-gradient(90deg, #00d4ff, #00ffcc); color:black;" onclick="reqBuy()">
-                <span class="lang-bn">কিনুন</span><span class="lang-en">Buy Now</span>
-            </button>
+            <button class="btn-main" style="margin:0; padding:12px; background:linear-gradient(90deg, #00d4ff, #00ffcc); color:black;" onclick="reqBuy()"><span class="lang-bn">কিনুন</span><span class="lang-en">Buy Now</span></button>
         </div>
         {% endfor %}
     </div>
@@ -1115,23 +770,17 @@ HTML_TEMPLATE = """
             <div style="font-size:35px; margin-bottom:10px;">💎</div>
             <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
             <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} VIP (No Ads)</p>
-            <button class="btn-main" style="margin:0; padding:12px; background:#c72cff;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})">
-                <span class="lang-bn">কয়েন দিয়ে নিন</span><span class="lang-en">Exchange Coin</span>
-            </button>
+            <button class="btn-main" style="margin:0; padding:12px; background:#c72cff;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})"><span class="lang-bn">কয়েন দিয়ে নিন</span><span class="lang-en">Exchange Coin</span></button>
         </div>
         {% endfor %}
     </div>
 </div>
 
-<!-- SETTINGS PAGE (USER PROFILE & MEMBERSHIP) -->
 <div id="page-settings" class="page">
     <div class="balance-card">
-        <p style="margin:0; color:#aaa; font-size:12px; letter-spacing:1px;">
-            <span class="lang-bn">আপনার ব্যালেন্স</span><span class="lang-en">YOUR BALANCE</span>
-        </p>
+        <p style="margin:0; color:#aaa; font-size:12px; letter-spacing:1px;"><span class="lang-bn">আপনার ব্যালেন্স</span><span class="lang-en">YOUR BALANCE</span></p>
         <h1 style="color:#ffb703; margin:15px 0 10px 0; font-size:48px;">🏛 <span id="set-balance">0</span></h1>
         <p style="margin:0; color:#666; font-size:12px; margin-bottom:5px;">ID: <span id="set-id"></span></p>
-        
         <div id="mem-status" style="display:inline-block; padding:5px 15px; border-radius:15px; font-size:12px; font-weight:bold; background:rgba(255,255,255,0.1); margin-top:5px;">👤 Regular Member</div>
         <div id="mem-expiry" style="color:#ffb703; font-size:11px; margin-top:5px; display:none;"></div>
     </div>
@@ -1143,7 +792,6 @@ HTML_TEMPLATE = """
             <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড দিয়ে ফ্রি কয়েন বা VIP নিন</span><span class="lang-en">Redeem to get free coins/VIP</span></span>
         </div>
     </div>
-    
     <div class="set-item" onclick="switchNav('share')">
         <div class="set-icon" style="background: linear-gradient(135deg, #ffecd2, #fcb69f);">🎁</div>
         <div>
@@ -1153,13 +801,11 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- SUB PAGES -->
 <div id="page-coupon" class="page">
     <h2 style="margin-top:0;">🎟 <span class="lang-bn">কুপন কোড</span><span class="lang-en">Coupon Code</span></h2>
-    <!-- NEW TEXT: Coupon benefits -->
     <p style="font-size:13px; color:#aaa; margin-bottom:20px;">
-        <span class="lang-bn">এখানে অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি সরাসরি আপনার অ্যাকাউন্টে <b>ফ্রি কয়েন</b> অথবা <b>VIP মেম্বারশিপ</b> পেয়ে যাবেন!</span>
-        <span class="lang-en">Enter the secret code given by admin to instantly receive <b>Free Coins</b> or <b>VIP Membership</b>!</span>
+        <span class="lang-bn">অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি <b>ফ্রি কয়েন</b> অথবা <b>VIP</b> পাবেন!</span>
+        <span class="lang-en">Enter secret code to instantly receive <b>Free Coins</b> or <b>VIP</b>!</span>
     </p>
     <div style="display:flex; gap:10px; margin-bottom:20px;">
         <input type="text" id="coupon-input" class="search-box" style="margin:0; border-radius:12px;" placeholder="Enter coupon">
@@ -1170,7 +816,6 @@ HTML_TEMPLATE = """
 <div id="page-share" class="page">
     <h2 style="margin-top:0;">🎁 <span class="lang-bn">শেয়ার করুন</span><span class="lang-en">Share</span></h2>
     <div class="share-banner">
-        <!-- NEW TEXT: {{ ref_coin }} added -->
         <span class="lang-bn">🥳 বন্ধু আপনার লিংক দিয়ে স্টার্ট করলেই <b style="color:#ffb703;">{{ ref_coin }} কয়েন</b> বোনাস পাবেন!</span>
         <span class="lang-en">🥳 Get <b style="color:#ffb703;">{{ ref_coin }} Coins</b> bonus when a friend starts using your link!</span>
     </div>
@@ -1180,7 +825,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- BOTTOM NAV -->
 <div class="bottom-nav">
     <div class="nav-item active" onclick="switchNav('home', this)"><span>🏠</span> All Vids</div>
     <div class="nav-item" onclick="switchNav('regvids', this)"><span>👤</span> Regular</div>
@@ -1190,7 +834,6 @@ HTML_TEMPLATE = """
     <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Setting</div>
 </div>
 
-<!-- JAVASCRIPT LOGIC -->
 <script>
     let tg = window.Telegram.WebApp;
     tg.expand();
@@ -1199,14 +842,13 @@ HTML_TEMPLATE = """
     let userId = tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 123456789; 
     
     document.getElementById('set-id').innerText = userId;
+    // Default refer link for the copy box (changed to standard link)
     document.getElementById('ref-link').value = `https://t.me/${botUsername}?start=${userId}`;
     
     let userBalance = 0;
-    let userHistory = []; // NEW: Array for history
+    let userHistory = []; 
     
-    // LANGUAGE LOGIC
     let currentLang = localStorage.getItem('appLang') || 'bn';
-    
     function applyLanguage() {
         let isBn = currentLang === 'bn';
         document.querySelectorAll('.lang-bn').forEach(el => el.style.display = isBn ? 'inline-block' : 'none');
@@ -1214,48 +856,35 @@ HTML_TEMPLATE = """
         document.getElementById('lang-btn').innerText = isBn ? 'English' : 'বাংলা';
         localStorage.setItem('appLang', currentLang);
     }
-    
-    function toggleLanguage() {
-        currentLang = currentLang === 'bn' ? 'en' : 'bn';
-        applyLanguage();
-    }
+    function toggleLanguage() { currentLang = currentLang === 'bn' ? 'en' : 'bn'; applyLanguage(); }
     applyLanguage();
 
     async function loadUser() {
         let res = await fetch('/api/user/' + userId);
         let data = await res.json();
         userBalance = data.balance;
-        userHistory = data.history || []; // NEW
-        
+        userHistory = data.history || []; 
         document.getElementById('hdr-balance').innerText = userBalance;
         document.getElementById('set-balance').innerText = userBalance;
         
         if(data.is_premium) {
             document.getElementById('prem-badge').style.display = 'inline-block';
             let memBox = document.getElementById('mem-status');
-            memBox.innerHTML = '💎 Premium Member';
-            memBox.style.background = 'linear-gradient(90deg, #c72cff, #ff007f)';
-            memBox.style.color = '#fff';
-            let expBox = document.getElementById('mem-expiry');
-            expBox.style.display = 'block';
-            expBox.innerText = (currentLang==='bn'?"মেয়াদ: ":"Expiry: ") + data.expiry;
+            memBox.innerHTML = '💎 Premium Member'; memBox.style.background = 'linear-gradient(90deg, #c72cff, #ff007f)'; memBox.style.color = '#fff';
+            document.getElementById('mem-expiry').style.display = 'block';
+            document.getElementById('mem-expiry').innerText = (currentLang==='bn'?"মেয়াদ: ":"Expiry: ") + data.expiry;
         } else {
             document.getElementById('prem-badge').style.display = 'none';
             let memBox = document.getElementById('mem-status');
-            memBox.innerHTML = '👤 Regular Member';
-            memBox.style.background = 'rgba(255,255,255,0.1)';
-            memBox.style.color = '#fff';
+            memBox.innerHTML = '👤 Regular Member'; memBox.style.background = 'rgba(255,255,255,0.1)'; memBox.style.color = '#fff';
             document.getElementById('mem-expiry').style.display = 'none';
         }
-        renderHistory(); // NEW
+        renderHistory();
     }
     loadUser();
 
-    // STRICT 18+ NOTICE - EVERY SINGLE TIME IT OPENS
     document.getElementById('age-modal').style.display = 'flex';
-    function confirmAge() { 
-        document.getElementById('age-modal').style.display = 'none'; 
-    }
+    function confirmAge() { document.getElementById('age-modal').style.display = 'none'; }
 
     function switchNav(pageId, element=null) {
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -1274,11 +903,9 @@ HTML_TEMPLATE = """
         document.getElementById('pkg-coin').style.display = type === 'coin' ? 'block' : 'none';
     }
 
-    // --- PAGINATION LOGIC (1 2 3 See All) ---
     let allFiles = {{ files_json | safe }};
     let state = { home: { p: 1, lim: 20, q: "" }, reg: { p: 1, lim: 20, q: "" }, prem: { p: 1, lim: 20, q: "" } };
 
-    // NEW: SLIDER LOGIC
     function renderSlider() {
         let sorted = [...allFiles].sort((a,b) => (b.views||0) - (a.views||0)).slice(0, 8);
         let html = "";
@@ -1297,24 +924,24 @@ HTML_TEMPLATE = """
         let s = state[tab];
         let maxP = Math.ceil(total / s.lim) || 1;
         if(s.p > maxP) s.p = maxP;
-        
         let html = `<button class="page-btn" onclick="chgP('${tab}', -1)" ${s.p===1?'disabled':''}>Prev</button>`;
-        
         let start = Math.max(1, s.p - 1);
         let end = Math.min(maxP, start + 2);
         if(end - start < 2) start = Math.max(1, end - 2);
-        
-        for(let i=start; i<=end; i++){
-            html += `<button class="page-btn ${s.p===i?'active':''}" onclick="setP('${tab}', ${i})">${i}</button>`;
-        }
+        for(let i=start; i<=end; i++){ html += `<button class="page-btn ${s.p===i?'active':''}" onclick="setP('${tab}', ${i})">${i}</button>`; }
         html += `<button class="page-btn" onclick="chgP('${tab}', 1)" ${s.p>=maxP?'disabled':''}>Next</button>`;
         html += `<button class="page-btn" style="background:#444;" onclick="setLim('${tab}', 100)">All</button>`;
-        
         document.getElementById(`${tab}-pagination`).innerHTML = html;
     }
 
     function createCard(f) {
         let tag = f.is_premium ? '<div class="tag-premium">💎 VIP</div>' : '<div class="tag-regular">👤 Regular</div>';
+        
+        let likesArr = Array.isArray(f.likes) ? f.likes : [];
+        let likeCount = likesArr.length;
+        let isLiked = likesArr.includes(userId);
+        let heartColor = isLiked ? '#ff4d4d' : 'white';
+
         return `<div class="video-card">
             <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
             ${tag}
@@ -1324,7 +951,7 @@ HTML_TEMPLATE = """
                 <small style="color:#aaa;">👁 ${f.views || 0} views</small>
             </div>
             <div class="video-actions">
-                <button onclick="likeVideo('${f._id}')">❤️ <span id="like-${f._id}">${f.likes || 0}</span></button>
+                <button id="like-btn-${f._id}" style="color:${heartColor};" onclick="likeVideo('${f._id}')">❤️ <span id="like-${f._id}">${likeCount}</span></button>
                 <button onclick="openComments('${f._id}')">💬 Comment</button>
                 <button onclick="shareVideo('${f._id}')">↗️ Share</button>
             </div>
@@ -1338,16 +965,10 @@ HTML_TEMPLATE = """
             if(tab === 'reg' && f.is_premium) return false;
             return f.title.toLowerCase().includes(s.q);
         });
-        
         let start = (s.p - 1) * s.lim;
         let pageFiles = filtered.slice(start, start + s.lim);
-        
-        let html = "";
-        if(pageFiles.length === 0) html = "<p style='text-align:center; color:#666;'>No videos found!</p>";
-        
-        pageFiles.forEach(f => {
-            html += createCard(f);
-        });
+        let html = pageFiles.length === 0 ? "<p style='text-align:center; color:#666;'>No videos found!</p>" : "";
+        pageFiles.forEach(f => { html += createCard(f); });
         document.getElementById(`${tab}-video-list`).innerHTML = html;
         renderPagination(tab, filtered.length);
     }
@@ -1359,30 +980,37 @@ HTML_TEMPLATE = """
         document.getElementById('history-video-list').innerHTML = html;
     }
 
-    function handleSearch(tab) { 
-        let id = tab==='home'? 'search-bar' : 'search-bar-'+tab;
-        state[tab].q = document.getElementById(id).value.toLowerCase(); 
-        state[tab].p = 1; 
-        renderList(tab); 
-    }
+    function handleSearch(tab) { let id = tab==='home'? 'search-bar' : 'search-bar-'+tab; state[tab].q = document.getElementById(id).value.toLowerCase(); state[tab].p = 1; renderList(tab); }
     function chgP(tab, dir) { state[tab].p += dir; renderList(tab); }
     function setP(tab, num) { state[tab].p = num; renderList(tab); }
     function setLim(tab, lim) { state[tab].lim = lim; state[tab].p = 1; renderList(tab); }
 
-    renderList('home'); 
-    renderList('reg');
-    renderList('prem');
+    renderList('home'); renderList('reg'); renderList('prem');
 
-    // NEW ACTIONS LOGIC
+    // INSTANT LIKE LOGIC (ONLY ONCE PER USER)
     async function likeVideo(id) {
+        let btn = document.getElementById(`like-btn-${id}`);
         let span = document.getElementById(`like-${id}`);
-        span.innerText = parseInt(span.innerText) + 1;
+        if (btn.style.color === 'rgb(255, 77, 77)' || btn.style.color === '#ff4d4d') return; // Already liked
+        
+        btn.style.color = '#ff4d4d'; // Instant change
+        span.innerText = parseInt(span.innerText || 0) + 1;
+        
+        // Update local object so it stays red if you switch tabs
+        let file = allFiles.find(f => f._id === id);
+        if(file) {
+            if(!Array.isArray(file.likes)) file.likes = [];
+            if(!file.likes.includes(userId)) file.likes.push(userId);
+        }
+
         await fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'like', uid:userId, file_id:id}) });
     }
+    
+    // SHARE LINK LOGIC FOR INCOME (ref + file)
     function shareVideo(id) {
-        let link = `https://t.me/${botUsername}?start=file_${id}`;
+        let link = `https://t.me/${botUsername}?start=ref${userId}file${id}`;
         navigator.clipboard.writeText(link);
-        tg.showAlert(currentLang === 'bn' ? "✅ ভিডিও লিংক কপি হয়েছে! বন্ধুদের সাথে শেয়ার করুন।" : "✅ Video link copied! Share with friends.");
+        tg.showAlert(currentLang === 'bn' ? "✅ লিংক কপি হয়েছে! এটি শেয়ার করলে আপনি রেফার বোনাস পাবেন।" : "✅ Link copied! Share this to get refer bonus.");
     }
     
     let currentCommentId = null;
@@ -1409,7 +1037,6 @@ HTML_TEMPLATE = """
         openComments(currentCommentId);
     }
 
-    // --- ADS ANTI-CHEAT TIMER ---
     let currentDeepLink = "";
     let adDataGlobal = null;
     let timerInterval = null;
@@ -1419,7 +1046,6 @@ HTML_TEMPLATE = """
         cFileId = fileId;
         currentDeepLink = `https://t.me/${botUsername}?start=file_${fileId}`;
 
-        // Add to history
         if(!userHistory.includes(fileId)) {
             userHistory.push(fileId);
             fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'history', uid:userId, file_id:fileId}) });
@@ -1429,12 +1055,8 @@ HTML_TEMPLATE = """
         let res = await fetch(`/api/get_ad/${userId}/${fileId}`);
         adDataGlobal = await res.json();
 
-        if (adDataGlobal.show_ad) {
-            startAdProcess();
-        } else {
-            tg.openTelegramLink(currentDeepLink);
-            setTimeout(() => tg.close(), 500);
-        }
+        if (adDataGlobal.show_ad) { startAdProcess(); } 
+        else { tg.openTelegramLink(currentDeepLink); setTimeout(() => tg.close(), 500); }
     }
 
     function startAdProcess() {
@@ -1442,13 +1064,9 @@ HTML_TEMPLATE = """
         document.getElementById('get-file-btn').style.display = 'none';
         document.getElementById('timer-count').style.display = 'block';
 
-        let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || {
-            step: 1, timeLeft: adDataGlobal.wait_time
-        };
-        
+        let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
         document.getElementById('step-info').innerText = `Step ${adState.step} of ${adDataGlobal.steps}`;
         document.getElementById('timer-count').innerText = adState.timeLeft;
-        
         window.open(adDataGlobal.ad_link, '_blank');
 
         clearInterval(timerInterval);
@@ -1463,8 +1081,7 @@ HTML_TEMPLATE = """
                     btn.innerText = "Next Step";
                     btn.style.display = 'block';
                     btn.onclick = () => {
-                        adState.step++;
-                        adState.timeLeft = adDataGlobal.wait_time;
+                        adState.step++; adState.timeLeft = adDataGlobal.wait_time;
                         localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
                         startAdProcess();
                     };
@@ -1474,8 +1091,7 @@ HTML_TEMPLATE = """
                     btn.style.display = 'block';
                     btn.onclick = () => {
                         localStorage.removeItem('ad_state_' + cFileId);
-                        tg.openTelegramLink(currentDeepLink);
-                        setTimeout(()=>tg.close(), 500);
+                        tg.openTelegramLink(currentDeepLink); setTimeout(()=>tg.close(), 500);
                     };
                 }
             } else {
@@ -1491,10 +1107,7 @@ HTML_TEMPLATE = """
         let res = await fetch('/api/redeem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, code: code }) });
         let data = await res.json();
         tg.showAlert(data.msg);
-        if(data.status === 'success') { 
-            loadUser(); 
-            document.getElementById('coupon-input').value = ""; 
-        }
+        if(data.status === 'success') { loadUser(); document.getElementById('coupon-input').value = ""; }
     }
     
     async function buyWithCoin(pkgId, cost) {
@@ -1503,15 +1116,12 @@ HTML_TEMPLATE = """
         if(confirm(confirmText)) {
             let res = await fetch('/api/buy_with_coin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, pkg_id: pkgId }) });
             let data = await res.json();
-            tg.showAlert(data.msg);
-            loadUser();
+            tg.showAlert(data.msg); loadUser();
         }
     }
 
     function copyRef() { 
-        let c = document.getElementById("ref-link"); 
-        c.select(); 
-        navigator.clipboard.writeText(c.value); 
+        let c = document.getElementById("ref-link"); c.select(); navigator.clipboard.writeText(c.value); 
         tg.showAlert(currentLang==='bn'?"✅ রেফার লিংক কপি হয়েছে!":"✅ Link Copied!"); 
     }
     
@@ -1531,9 +1141,6 @@ def home():
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
     return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=config, site_name=config.get("site_name", "Glow Top"), ref_coin=config.get("ref_coin", 10))
 
-# ==========================================
-# 9. RUN LOGIC (SAFE & ROBUST)
-# ==========================================
 def run_flask(): 
     web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
 
