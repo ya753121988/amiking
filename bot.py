@@ -41,17 +41,17 @@ admin_steps = {}
 
 db_client, db = None, None 
 users_col, files_col, cats_col = None, None, None
-pkgs_col, links_col, config_col, channels_col, coupons_col = None, None, None, None, None 
+pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col = None, None, None, None, None, None 
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["ShilaCallApp"]
 
 async def get_db(): 
-    global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col 
+    global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col
     if db_client is None:
         db_client = AsyncIOMotorClient(MONGO_URI) 
         db = db_client["ShilaCallApp"]
         users_col, files_col, cats_col = db["users"], db["files"], db["categories"]
         pkgs_col, links_col, config_col = db["packages"], db["ad_links"], db["config"]
-        channels_col, coupons_col = db["channels"], db["coupons"] 
+        channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"] 
     return db
 
 async def get_config(): 
@@ -67,7 +67,7 @@ async def delete_msg_later(client, chat_id, msg_id, delay):
     try: await client.delete_messages(chat_id, msg_id) 
     except: pass
 
-# --- TIME FORMATTER (বছর, মাস, দিন...) ---
+# --- TIME FORMATTER ---
 def get_expiry_str(expiry_date): 
     if not expiry_date: return None 
     now = datetime.now() 
@@ -98,6 +98,35 @@ def keep_alive():
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # ==========================================
+# 2.5 MULTI-MONGODB MANAGER
+# ==========================================
+async_mongo_clients = {}
+sync_mongo_clients = {}
+
+async def get_extra_dbs_async():
+    await get_db()
+    dbs = [db] # Main DB
+    async for m in mongos_col.find():
+        uri = m["uri"]
+        if uri not in async_mongo_clients:
+            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=2000)["ShilaCallApp"]
+            except: continue
+        dbs.append(async_mongo_clients[uri])
+    return dbs
+
+def get_extra_dbs_sync():
+    dbs = [sync_db] # Main DB
+    try:
+        for m in sync_db["mongos"].find():
+            uri = m["uri"]
+            if uri not in sync_mongo_clients:
+                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=2000)["ShilaCallApp"]
+                except: continue
+            dbs.append(sync_mongo_clients[uri])
+    except: pass
+    return dbs
+
+# ==========================================
 # 3. BACKGROUND TASKS
 # ==========================================
 async def background_tasks(): 
@@ -124,10 +153,15 @@ async def background_tasks():
             ap_hr = config.get("autopost_time_hr", 0)
             if ap_hr > 0 and (now - last_autopost) >= (ap_hr * 3600):
                 idx = config.get("autopost_idx", 0)
-                files = await files_col.find().sort("_id", 1).to_list(None)
-                if files:
-                    if idx >= len(files): idx = 0
-                    f = files[idx]
+                
+                # Fetching files from all DBs for auto-post
+                all_files = []
+                for d in await get_extra_dbs_async():
+                    all_files.extend(await d["files"].find().sort("_id", 1).to_list(None))
+                
+                if all_files:
+                    if idx >= len(all_files): idx = 0
+                    f = all_files[idx]
                     users = await users_col.find().to_list(None)
                     btn = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now / দেখুন", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
                     for u in users:
@@ -150,14 +184,18 @@ async def cmd_myid(c, m):
 async def cmd_stats(c, m): 
     await get_db() 
     t_u = await users_col.count_documents({}) 
-    t_f = await files_col.count_documents({}) 
     p_u = await users_col.count_documents({"premium_until": {"$gt": datetime.now()}}) 
-    await m.reply(f"📊 Statistics:\n\n👥 Users: {t_u}\n🎬 Files: {t_f}\n💎 Premium: {p_u}\n👤 Regular: {t_u - p_u}")
+    
+    t_f = 0
+    dbs = await get_extra_dbs_async()
+    for d in dbs: t_f += await d["files"].count_documents({})
+    
+    await m.reply(f"📊 Statistics:\n\n👥 Users: {t_u}\n🎬 Total Files: {t_f}\n💎 Premium: {p_u}\n👤 Regular: {t_u - p_u}\n🗄 Attached MongoDBs: {len(dbs)}")
 
 @app.on_message(filters.command("name") & filters.user(ADMIN_ID))
 async def cmd_name(c, m):
     new_name = m.text.replace("/name", "").strip()
-    if not new_name: return await m.reply("❌ সাইটের নাম দিন / Please provide a site name. Example: /name MySite")
+    if not new_name: return await m.reply("❌ সঠিক নিয়ম: `/name <Site_Name>`\nউদাহরণ: `/name MySite`")
     await get_db()
     await config_col.update_one({"_id": "settings"}, {"$set": {"site_name": new_name}})
     await m.reply(f"✅ সাইটের নাম পরিবর্তন করা হয়েছে / Site name changed to: {new_name}")
@@ -169,7 +207,6 @@ async def start_cmd(client, message):
     args = message.text.split() 
     config = await get_config()
 
-    # SHARE LINK LOGIC: Extracting ref_id and file_id properly for Income
     ref_by = None
     pf = None
     if len(args) > 1:
@@ -179,7 +216,6 @@ async def start_cmd(client, message):
         elif val.startswith("file_"):
             pf = val.replace("file_", "")
         elif val.startswith("ref") and "file" in val:
-            # Example payload from share link: ref12345fileABCDE
             try:
                 parts = val.replace("ref", "").split("file")
                 ref_by = int(parts[0])
@@ -215,10 +251,17 @@ async def start_cmd(client, message):
     if user.get("pending_file"):
         f_id = user["pending_file"]
         await users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}})
-        file_data = await files_col.find_one({"_id": f_id})
+        
+        file_data = None
+        target_db = None
+        for d in await get_extra_dbs_async():
+            file_data = await d["files"].find_one({"_id": f_id})
+            if file_data:
+                target_db = d
+                break
         
         if file_data:
-            await files_col.update_one({"_id": f_id}, {"$inc": {"views": 1}})
+            await target_db["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
             msg = await message.reply("⏳ আপনার ফাইল পাঠানো হচ্ছে... / Sending your file...")
             try:
                 sent_msg = await client.send_cached_media(chat_id=uid, file_id=file_data["file_id"], caption=f"🎬 **{file_data['title']}**", protect_content=config.get("frotect", False))
@@ -264,7 +307,7 @@ async def check_join_cb(c, q):
     await start_cmd(c, FakeMsg(q.from_user))
 
 # ==========================================
-# 5. ADMIN FILE UPLOAD
+# 5. ADMIN FILE UPLOAD & MULTI-MONGO
 # ==========================================
 @app.on_message(filters.command("addfile") & filters.user(ADMIN_ID)) 
 async def cmd_addfile(c, m): 
@@ -285,7 +328,6 @@ async def handle_admin_photo(c, m):
     msg = await m.reply("⏳ ছবি ডাটাবেসে সেভ করা হচ্ছে... / Saving image to Database...") 
     path = await m.download() 
     
-    # Store Image Directly to MongoDB (Supports Any format via Base64)
     try:
         with open(path, "rb") as image_file:
             encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
@@ -309,41 +351,128 @@ async def filetype_cb(c, q):
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("file")) 
 async def handle_admin_file(c, m): 
-    await get_db() 
     msg = await m.reply("⏳ ফাইল সেভ করা হচ্ছে... / Saving file...") 
     short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) 
     f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id) 
-    await files_col.insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": [], "comments": [] }) 
+    
+    dbs = await get_extra_dbs_async()
+    target_db = dbs[0]
+    min_size = float('inf')
+    
+    # Auto-Distribution: Find DB with the most free storage
+    for d in dbs:
+        try:
+            st = await d.command("dbstats")
+            if st["dataSize"] < min_size:
+                min_size = st["dataSize"]
+                target_db = d
+        except: pass
+
+    await target_db["files"].insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": [], "comments": [] }) 
     del admin_steps[m.from_user.id] 
-    await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: {short_id}")
+    
+    db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
+    await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
 
 @app.on_message(filters.command("delfile") & filters.user(ADMIN_ID)) 
 async def cmd_delfile(c, m): 
-    await get_db(); res = await files_col.delete_one({"_id": m.text.split()[1]}) 
-    if res.deleted_count > 0: await m.reply("✅ ফাইল ডিলিট হয়েছে! / File Deleted!") 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/delfile <file_id>`\nউদাহরণ: `/delfile AbCd123`")
+    f_id = m.text.split()[1]
+    deleted = False
+    for d in await get_extra_dbs_async():
+        res = await d["files"].delete_one({"_id": f_id})
+        if res.deleted_count > 0:
+            deleted = True
+            break
+    if deleted: await m.reply("✅ ফাইল ডিলিট হয়েছে! / File Deleted!") 
     else: await m.reply("❌ ফাইল পাওয়া যায়নি! / File Not Found!")
 
 @app.on_message(filters.command("delall") & filters.user(ADMIN_ID)) 
 async def cmd_delall(c, m): 
-    await get_db(); await files_col.delete_many({}); await m.reply("✅ সকল ফাইল ডিলিট করা হয়েছে! / All files deleted!")
+    for d in await get_extra_dbs_async(): await d["files"].delete_many({})
+    await m.reply("✅ সকল ফাইল ডিলিট করা হয়েছে! / All files deleted from all DBs!")
+
+# --- MONGODB MANAGER COMMANDS ---
+@app.on_message(filters.command("mongo") & filters.user(ADMIN_ID))
+async def cmd_mongo(c, m):
+    args = m.text.split()
+    if len(args) < 2: return await m.reply("❌ সঠিক নিয়ম: `/mongo <mongodb_uri>`\nউদাহরণ: `/mongo mongodb+srv://...`")
+    uri = args[1]
+    msg = await m.reply("⏳ কানেক্ট করা হচ্ছে... / Connecting...")
+    try:
+        test_client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=3000)
+        await test_client.server_info()
+        await get_db()
+        await mongos_col.insert_one({"uri": uri})
+        await msg.edit_text("✅ নতুন MongoDB সফলভাবে যুক্ত করা হয়েছে! স্টোরেজ লিমিট বেড়ে গেছে! 🚀")
+    except Exception as e:
+        await msg.edit_text(f"❌ MongoDB কানেক্ট করতে ব্যর্থ হয়েছে!\nError: {e}")
+
+@app.on_message(filters.command("delmongo") & filters.user(ADMIN_ID))
+async def cmd_delmongo(c, m):
+    await get_db()
+    dbs = await mongos_col.find().to_list(None)
+    if not dbs: return await m.reply("❌ কোনো এক্সট্রা MongoDB নেই! / No extra MongoDB found!")
+    btns = [[InlineKeyboardButton(f"❌ {db['uri'][:25]}...", callback_data=f"delmongo_{db['_id']}")] for db in dbs]
+    await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^delmongo_") & filters.user(ADMIN_ID))
+async def delmongo_cb(c, q):
+    await get_db()
+    db_id = q.data.split("_")[1]
+    doc = await mongos_col.find_one({"_id": ObjectId(db_id)})
+    if doc:
+        await mongos_col.delete_one({"_id": ObjectId(db_id)})
+        if doc["uri"] in async_mongo_clients: del async_mongo_clients[doc["uri"]]
+        if doc["uri"] in sync_mongo_clients: del sync_mongo_clients[doc["uri"]]
+        await q.message.edit_text("✅ MongoDB ডিলিট করা হয়েছে! / MongoDB Deleted!")
+    else:
+        await q.message.edit_text("❌ পাওয়া যায়নি! / Not found!")
+
+@app.on_message(filters.command("mongostats") & filters.user(ADMIN_ID))
+async def cmd_mongostats(c, m):
+    msg = await m.reply("⏳ তথ্য সংগ্রহ করা হচ্ছে... / Fetching stats...")
+    dbs = await get_extra_dbs_async()
+    text = "📊 **MongoDB Storage Stats:**\n\n"
+    for i, d in enumerate(dbs):
+        try:
+            stats = await d.command("dbstats")
+            files_count = await d["files"].count_documents({})
+            size_mb = stats["dataSize"] / (1024 * 1024)
+            limit_mb = 512
+            free_mb = limit_mb - size_mb
+            pct = (size_mb / limit_mb) * 100
+            
+            name = "🔹 Main Database (Default)" if i == 0 else f"🔸 Extra DB {i}"
+            text += f"{name}\n"
+            text += f"🎬 Files Stored: {files_count}\n"
+            text += f"📦 Storage Used: {size_mb:.2f} MB ({pct:.1f}%)\n"
+            text += f"🟢 Free Space: {free_mb:.2f} MB\n\n"
+        except Exception as e:
+            text += f"❌ **DB {i}** - Connection Error!\n\n"
+    await msg.edit_text(text)
 
 # ==========================================
-# 6. OTHER ADMIN COMMANDS
+# 6. OTHER ADMIN COMMANDS (WITH EMPTY PROTECT)
 # ==========================================
 @app.on_message(filters.command("prstep") & filters.user(ADMIN_ID)) 
 async def cmd_prstep(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/prstep <step>`\nউদাহরণ: `/prstep 2`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"prstep": int(m.text.split()[1])}}); await m.reply("✅ Premium Ad Steps Set!")
 
 @app.on_message(filters.command("regstep") & filters.user(ADMIN_ID)) 
 async def cmd_regstep(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/regstep <step>`\nউদাহরণ: `/regstep 1`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"regstep": int(m.text.split()[1])}}); await m.reply("✅ Regular Ad Steps Set!")
 
 @app.on_message(filters.command("addadmin") & filters.user(ADMIN_ID)) 
 async def cmd_addadmin(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/addadmin <username>`\nউদাহরণ: `/addadmin Sudo_king`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"payment_admin": m.text.split()[1].replace("@", "")}}); await m.reply("✅ Payment Admin Set!")
 
 @app.on_message(filters.command("addlink") & filters.user(ADMIN_ID)) 
 async def cmd_addlink(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/addlink <link>`\nউদাহরণ: `/addlink https://adlink.com/...`")
     await get_db(); await links_col.insert_one({"link": m.text.split()[1]}); await m.reply("✅ Ad Link Added!")
 
 @app.on_message(filters.command("delink") & filters.user(ADMIN_ID)) 
@@ -358,6 +487,7 @@ async def dellink_cb(c, q):
 
 @app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID)) 
 async def cmd_addcnl(c, m): 
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/addcnl <Name> <Link>`\nউদাহরণ: `/addcnl MyChannel https://t.me/...`")
     await get_db(); p = m.text.split(maxsplit=2); await channels_col.insert_one({"type": "inline", "name": p[1], "link": p[2]}); await m.reply("✅ Inline Channel added!")
 
 @app.on_message(filters.command("delcnl") & filters.user(ADMIN_ID)) 
@@ -368,6 +498,7 @@ async def cmd_delcnl(c, m):
 
 @app.on_message(filters.command("vercnl") & filters.user(ADMIN_ID)) 
 async def cmd_vercnl(c, m): 
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/vercnl <ChatID> <Link>`\nউদাহরণ: `/vercnl -10012345678 https://t.me/...`")
     await get_db(); p = m.text.split(); await channels_col.insert_one({"type": "must_join", "chat_id": int(p[1]), "link": p[2]}); await m.reply("✅ Must Join Channel Added!")
 
 @app.on_message(filters.command("delvrcnl") & filters.user(ADMIN_ID)) 
@@ -382,7 +513,9 @@ async def delch_cb(c, q):
 
 @app.on_message(filters.command("addtex") & filters.user(ADMIN_ID)) 
 async def cmd_addtex(c, m): 
-    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": m.text.replace("/addtex", "").strip()}}); await m.reply("✅ Start Text Set!")
+    tex = m.text.replace("/addtex", "").strip()
+    if not tex: return await m.reply("❌ সঠিক নিয়ম: `/addtex <Text>`\nউদাহরণ: `/addtex স্বাগতম!`")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": tex}}); await m.reply("✅ Start Text Set!")
 
 @app.on_message(filters.command("deltex") & filters.user(ADMIN_ID)) 
 async def cmd_deltex(c, m): 
@@ -393,23 +526,28 @@ async def cmd_logo(c, m):
     await get_db() 
     if m.reply_to_message and m.reply_to_message.photo: 
         await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": m.reply_to_message.photo.file_id}}); await m.reply("✅ Start Logo Set!")
+    else: await m.reply("❌ কোনো ছবির সাথে রিপ্লাই করে `/logo` দিন।")
 
 @app.on_message(filters.command("autvid") & filters.user(ADMIN_ID)) 
 async def cmd_autvid(c, m): 
     await get_db(); 
     if m.reply_to_message: 
         await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id}}); await m.reply("✅ Auto Vid Msg Set!")
+    else: await m.reply("❌ কোনো মেসেজ/ভিডিওতে রিপ্লাই করে `/autvid` দিন।")
 
 @app.on_message(filters.command("autvidti") & filters.user(ADMIN_ID)) 
 async def cmd_autvidti(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/autvidti <minutes>`\nউদাহরণ: `/autvidti 30`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_time_min": int(m.text.split()[1])}}); await m.reply("✅ Auto Vid Interval Set!")
 
 @app.on_message(filters.command("autpost") & filters.user(ADMIN_ID)) 
 async def cmd_autpost(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/autpost <hours>`\nউদাহরণ: `/autpost 2`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_time_hr": int(m.text.split()[1])}}); await m.reply("✅ Auto Post Interval Set!")
 
 @app.on_message(filters.command("refbonous") & filters.user(ADMIN_ID)) 
 async def cmd_refbonous(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/refbonous <coin>`\nউদাহরণ: `/refbonous 20`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": int(m.text.split()[1]), "ref_on": True}}); await m.reply("✅ Ref Bonus Set!")
 
 @app.on_message(filters.command("refbonousoff") & filters.user(ADMIN_ID)) 
@@ -418,26 +556,33 @@ async def cmd_refbonousoff(c, m):
 
 @app.on_message(filters.command("frotect") & filters.user(ADMIN_ID)) 
 async def cmd_frotect(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/frotect <on/off>`\nউদাহরণ: `/frotect on`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": m.text.split()[1].lower() == "on"}}); await m.reply("✅ Protect Config Set!")
 
 @app.on_message(filters.command("autodel") & filters.user(ADMIN_ID)) 
 async def cmd_autodel(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/autodel <seconds>`\nউদাহরণ: `/autodel 600`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"auto_del_time": int(m.text.split()[1])}}); await m.reply("✅ Auto Delete Set!")
 
 @app.on_message(filters.command("autex") & filters.user(ADMIN_ID)) 
 async def cmd_autex(c, m): 
-    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autodel_text": m.text.replace("/autex", "").strip()}}); await m.reply("✅ Auto Delete Text Set!")
+    tex = m.text.replace("/autex", "").strip()
+    if not tex: return await m.reply("❌ সঠিক নিয়ম: `/autex <Text>`\nউদাহরণ: `/autex নির্দিষ্ট সময় পর ডিলিট হবে।`")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autodel_text": tex}}); await m.reply("✅ Auto Delete Text Set!")
 
 @app.on_message(filters.command("usd") & filters.user(ADMIN_ID)) 
 async def cmd_usd(c, m): 
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/usd <Price> <Days>`\nউদাহরণ: `/usd 5 30`")
     await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "usd", "details": f"{p[1]} USD={p[2]} Days"}); await m.reply("✅ USD Package Added!")
 
 @app.on_message(filters.command("bdt") & filters.user(ADMIN_ID)) 
 async def cmd_bdt(c, m): 
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/bdt <Price> <Days>`\nউদাহরণ: `/bdt 100 30`")
     await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "bkash", "details": f"{p[1]} BDT={p[2]} Days"}); await m.reply("✅ BDT Package Added!")
 
 @app.on_message(filters.command("addcred") & filters.user(ADMIN_ID)) 
 async def cmd_addcred(c, m): 
+    if len(m.text.split()) < 5: return await m.reply("❌ সঠিক নিয়ম: `/addcred <Coins> = <Amount> <Unit>`\nউদাহরণ: `/addcred 500 = 7 d`")
     await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "coin", "coins": int(p[1]), "amount": int(p[3]), "unit": p[4], "details": f"{p[1]} Coins={p[3]} {p[4]}"}); await m.reply("✅ Coin Package Added!")
 
 @app.on_message(filters.command("delcred") & filters.user(ADMIN_ID)) 
@@ -452,10 +597,12 @@ async def delpkg_cb(c, q):
 
 @app.on_message(filters.command("prparadd") & filters.user(ADMIN_ID)) 
 async def cmd_prparadd(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/prparadd <seconds>`\nউদাহরণ: `/prparadd 10`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"prem_vid_wait": int(m.text.split()[1])}}); await m.reply("✅ Premium Vid Wait Time Set!")
 
 @app.on_message(filters.command("addrdiem") & filters.user(ADMIN_ID)) 
 async def cmd_addrdiem(c, m): 
+    if len(m.text.split()) < 4: return await m.reply("❌ সঠিক নিয়ম: `/addrdiem <UserID> <Amount> <Unit>`\nউদাহরণ: `/addrdiem 12345678 30 d`")
     await get_db() 
     p = m.text.split(); u_id, amt, unit = int(p[1]), int(p[2]), p[3].lower() 
     secs = {"s": 1, "m": 60, "h": 3600, "d": 86400, "y": 31536000}.get(unit, 0) 
@@ -464,12 +611,13 @@ async def cmd_addrdiem(c, m):
 
 @app.on_message(filters.command("delpremium") & filters.user(ADMIN_ID)) 
 async def cmd_delpremium(c, m): 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/delpremium <UserID>`\nউদাহরণ: `/delpremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(m.text.split()[1])}, {"$set": {"premium_until": None}}); await m.reply("✅ Premium Removed!")
 
 @app.on_message(filters.command("brodcast") & filters.user(ADMIN_ID)) 
 async def cmd_brodcast(c, m): 
     await get_db() 
-    if not m.reply_to_message: return await m.reply("❌ Reply to a message.") 
+    if not m.reply_to_message: return await m.reply("❌ Reply to a message / কোনো মেসেজে রিপ্লাই করে দিন।") 
     msg = await m.reply("⏳ Broadcasting..."); success = 0 
     for u in await users_col.find().to_list(None): 
         try: await m.reply_to_message.copy(u["_id"]); success += 1; await asyncio.sleep(0.05) 
@@ -478,11 +626,13 @@ async def cmd_brodcast(c, m):
 
 @app.on_message(filters.command("cnlbdcst") & filters.user(ADMIN_ID)) 
 async def cmd_cnlbdcst(c, m): 
-    if not m.reply_to_message: return await m.reply("❌ Reply to a message.") 
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/cnlbdcst <ChatID>` (রিপ্লাই করে)\nউদাহরণ: `/cnlbdcst -100123456`")
+    if not m.reply_to_message: return await m.reply("❌ Reply to a message / কোনো মেসেজে রিপ্লাই করে দিন।") 
     await m.reply_to_message.copy(m.text.split()[1]); await m.reply("✅ Message Sent to Channel/Group!")
 
 @app.on_message(filters.command("allred") & filters.user(ADMIN_ID)) 
 async def cmd_allred(c, m): 
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/allred <Limit> <Min-Max>`\nউদাহরণ: `/allred 100 10-50`")
     await get_db() 
     p = m.text.split(); lim, rng = int(p[1]), p[2].split("-") 
     code = "RND" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6)) 
@@ -496,7 +646,11 @@ async def cmd_allred(c, m):
 def get_ad_api(user_id, file_id): 
     config = sync_db["config"].find_one({"_id": "settings"}) or {} 
     user = sync_db["users"].find_one({"_id": user_id}) 
-    file_data = sync_db["files"].find_one({"_id": file_id})
+    
+    file_data = None
+    for d in get_extra_dbs_sync():
+        file_data = d["files"].find_one({"_id": file_id})
+        if file_data: break
 
     if user and user.get("premium_until") and user["premium_until"] > datetime.now(): return jsonify({"show_ad": False})
         
@@ -551,10 +705,14 @@ def handle_actions():
     if action == "history":
         sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"history": f_id}})
     elif action == "like":
-        sync_db["files"].update_one({"_id": f_id}, {"$addToSet": {"likes": uid}})
+        for d in get_extra_dbs_sync():
+            res = d["files"].update_one({"_id": f_id}, {"$addToSet": {"likes": uid}})
+            if res.modified_count > 0: break
     elif action == "comment":
         comment = {"uid": uid, "text": data.get("text"), "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
-        sync_db["files"].update_one({"_id": f_id}, {"$push": {"comments": comment}})
+        for d in get_extra_dbs_sync():
+            res = d["files"].update_one({"_id": f_id}, {"$push": {"comments": comment}})
+            if res.modified_count > 0: break
         return jsonify({"status": "success", "comment": comment})
     return jsonify({"status": "success"})
 
@@ -679,7 +837,7 @@ HTML_TEMPLATE = """
             <span class="lang-bn">এই ওয়েবসাইটের কনটেন্ট শুধুমাত্র <b style="color:#00d4ff;">১৮ বছর বা তার বেশি বয়সী</b> ব্যবহারকারীদের জন্য প্রযোজ্য।</span>
             <span class="lang-en">This website content is strictly for users who are <b style="color:#00d4ff;">18 years of age or older</b>.</span>
         </p>
-        <div class="alert-box"><span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন না।</span><span class="lang-en">⚠️ Do not enter if you are under 18.</span></div>
+        <div class="alert-box"><span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন শ্রেষ্ঠ না।</span><span class="lang-en">⚠️ Do not enter if you are under 18.</span></div>
         <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; margin-bottom:10px;" onclick="confirmAge()"><span class="lang-bn">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</span><span class="lang-en">✅ Yes, I am 18+</span></button>
         <button class="btn-main" style="background: transparent; border: 1px solid #555; color: #888;" onclick="tg.close()"><span class="lang-bn">❌ না, বের হয়ে যান</span><span class="lang-en">❌ No, Exit</span></button>
     </div>
@@ -842,7 +1000,6 @@ HTML_TEMPLATE = """
     let userId = tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 123456789; 
     
     document.getElementById('set-id').innerText = userId;
-    // Default refer link for the copy box (changed to standard link)
     document.getElementById('ref-link').value = `https://t.me/${botUsername}?start=${userId}`;
     
     let userBalance = 0;
@@ -987,16 +1144,14 @@ HTML_TEMPLATE = """
 
     renderList('home'); renderList('reg'); renderList('prem');
 
-    // INSTANT LIKE LOGIC (ONLY ONCE PER USER)
     async function likeVideo(id) {
         let btn = document.getElementById(`like-btn-${id}`);
         let span = document.getElementById(`like-${id}`);
-        if (btn.style.color === 'rgb(255, 77, 77)' || btn.style.color === '#ff4d4d') return; // Already liked
+        if (btn.style.color === 'rgb(255, 77, 77)' || btn.style.color === '#ff4d4d') return; 
         
-        btn.style.color = '#ff4d4d'; // Instant change
+        btn.style.color = '#ff4d4d'; 
         span.innerText = parseInt(span.innerText || 0) + 1;
         
-        // Update local object so it stays red if you switch tabs
         let file = allFiles.find(f => f._id === id);
         if(file) {
             if(!Array.isArray(file.likes)) file.likes = [];
@@ -1006,7 +1161,6 @@ HTML_TEMPLATE = """
         await fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'like', uid:userId, file_id:id}) });
     }
     
-    // SHARE LINK LOGIC FOR INCOME (ref + file)
     function shareVideo(id) {
         let link = `https://t.me/${botUsername}?start=ref${userId}file${id}`;
         navigator.clipboard.writeText(link);
@@ -1136,7 +1290,11 @@ HTML_TEMPLATE = """
 
 @web.route('/') 
 def home(): 
-    files = list(sync_db["files"].find().sort("_id", -1)) 
+    # ফ্লাস্কে সকল ডাটাবেস থেকে ফাইল ফেচ করা হচ্ছে 
+    files = []
+    for d in get_extra_dbs_sync():
+        files.extend(list(d["files"].find().sort("_id", -1)))
+        
     for f in files: f["_id"] = str(f["_id"]) 
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
     return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=config, site_name=config.get("site_name", "Glow Top"), ref_coin=config.get("ref_coin", 10))
