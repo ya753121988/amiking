@@ -1,5 +1,6 @@
 import os, sys, asyncio, threading, random, string, time, requests, json 
 from datetime import datetime, timedelta
+import base64 # <-- NEW: For Image processing
 
 # ==========================================
 # 🛑 PYROGRAM PYTHON 3.14 FIX 🛑
@@ -175,7 +176,8 @@ async def start_cmd(client, message):
 
     user = await users_col.find_one({"_id": uid})
     if not user:
-        await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None})
+        # NEW: Added history array for new users
+        await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": []})
         if len(args) > 1 and args[1].isdigit() and int(args[1]) != uid:
             ref_by = int(args[1])
             if config.get("ref_on", True):
@@ -253,7 +255,7 @@ async def check_join_cb(c, q):
     await start_cmd(c, FakeMsg(q.from_user))
 
 # ==========================================
-# 5. ADMIN FILE UPLOAD (FIXED IMAGE UPLOAD)
+# 5. ADMIN FILE UPLOAD
 # ==========================================
 def upload_to_telegraph(file_path): 
     try: 
@@ -282,13 +284,24 @@ async def handle_admin_name(c, m):
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("thumb")) 
 async def handle_admin_photo(c, m): 
-    msg = await m.reply("⏳ ছবি প্রসেস হচ্ছে... / Processing image...") 
+    msg = await m.reply("⏳ ছবি প্রসেস হচ্ছে এবং ডাটাবেসে সেভ হচ্ছে... / Processing image to MongoDB...") 
     path = await m.download() 
-    url = await asyncio.to_thread(upload_to_telegraph, path) 
+    
+    # NEW LOGIC: Convert Image to Base64 (Supports all formats, saves to DB directly)
+    try:
+        with open(path, "rb") as img_file:
+            b64_string = base64.b64encode(img_file.read()).decode('utf-8')
+        ext = path.split('.')[-1].lower() if '.' in path else 'jpg'
+        mime = f"image/{ext}" if ext in ['png', 'webp', 'gif', 'jpeg', 'heic', 'pdf'] else "image/jpeg"
+        url = f"data:{mime};base64,{b64_string}"
+    except Exception as e:
+        print("Image save error:", e)
+        url = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+        
     try: os.remove(path) 
     except: pass
 
-    admin_steps[m.from_user.id]["thumb_url"] = url or "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+    admin_steps[m.from_user.id]["thumb_url"] = url
 
     btns = [[InlineKeyboardButton("💎 Premium Video", callback_data="ftype_prem")], [InlineKeyboardButton("👤 Regular Video", callback_data="ftype_reg")]]
     await msg.edit_text("ভিডিওটি কি প্রিমিয়াম নাকি রেগুলার? / Is it Premium or Regular?", reply_markup=InlineKeyboardMarkup(btns))
@@ -305,7 +318,8 @@ async def handle_admin_file(c, m):
     msg = await m.reply("⏳ ফাইল সেভ করা হচ্ছে... / Saving file...") 
     short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) 
     f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id) 
-    await files_col.insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0 }) 
+    # NEW: Added likes and comments fields
+    await files_col.insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": 0, "comments": [] }) 
     del admin_steps[m.from_user.id] 
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: {short_id}")
 
@@ -536,6 +550,21 @@ def buy_with_coin():
     except: pass
     return jsonify({"status": "success", "msg": "✅ Premium Purchased Successfully!"})
 
+# NEW: API to handle likes, comments, and history
+@web.route('/api/action', methods=['POST'])
+def handle_actions():
+    data = request.json
+    action, uid, f_id = data.get('action'), data.get('uid'), data.get('file_id')
+    if action == "history":
+        sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"history": f_id}})
+    elif action == "like":
+        sync_db["files"].update_one({"_id": f_id}, {"$inc": {"likes": 1}})
+    elif action == "comment":
+        comment = {"uid": uid, "text": data.get("text"), "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        sync_db["files"].update_one({"_id": f_id}, {"$push": {"comments": comment}})
+        return jsonify({"status": "success", "comment": comment})
+    return jsonify({"status": "success"})
+
 @web.route('/api/user/<int:user_id>') 
 def get_user(user_id): 
     user = sync_db["users"].find_one({"_id": user_id}) 
@@ -558,7 +587,8 @@ def get_user(user_id):
             if sec or not res: res.append(f"{sec} সেকেন্ড/s")
             expiry_str = " ".join(res)
 
-    return jsonify({"balance": user.get("balance", 0) if user else 0, "is_premium": is_prem, "expiry": expiry_str})
+    # NEW: Returned user history in API response
+    return jsonify({"balance": user.get("balance", 0) if user else 0, "is_premium": is_prem, "expiry": expiry_str, "history": user.get("history", []) if user else []})
 
 # ==========================================
 # 8. EXPANDED HTML UI (GLOW TOP DESIGN & LOGIC)
@@ -925,6 +955,22 @@ HTML_TEMPLATE = """
         }
 
         .lang-en { display: none; }
+
+        /* NEW FEATURES CSS (Slider, History, Like, Comment, Share) */
+        .slider-title { font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #ffb703; }
+        .slider-container { display: flex; overflow-x: auto; gap: 12px; padding-bottom: 10px; margin-bottom: 20px; scrollbar-width: none; }
+        .slider-container::-webkit-scrollbar { display: none; }
+        .slider-card { min-width: 150px; background: rgba(25,25,35,0.8); border-radius: 12px; position: relative; border: 1px solid rgba(255,183,3,0.3); overflow: hidden; }
+        .slider-card img { width: 100%; height: 90px; object-fit: cover; }
+        .slider-card .s-title { font-size: 12px; padding: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .slider-play { position: absolute; top: 25%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 40px; background: rgba(0,123,255,0.8); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; box-shadow: 0 0 10px rgba(0,123,255,0.5); }
+        .slider-play::after { content: '▶'; color: white; font-size: 16px; margin-left: 3px; }
+        .video-actions { display: flex; justify-content: space-between; padding: 10px 15px; border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.2); }
+        .video-actions button { background: rgba(255,255,255,0.08); border: none; color: white; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 12px; display:flex; align-items:center; gap:5px; }
+        #comment-list { max-height:200px; overflow-y:auto; text-align:left; margin-bottom:15px; background:rgba(0,0,0,0.3); padding:10px; border-radius:10px;}
+        .cmt-item { border-bottom: 1px solid rgba(255,255,255,0.05); padding:5px 0; font-size:13px; }
+        .cmt-item:last-child { border:none; }
+        .close-btn { position: absolute; top:10px; right:15px; background:transparent; border:none; color:white; font-size:20px; cursor:pointer;}
     </style>
 </head>
 <body>
@@ -981,8 +1027,25 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
+<!-- COMMENTS MODAL -->
+<div id="comment-modal" class="modal-overlay">
+    <div class="modal-box">
+        <button class="close-btn" onclick="document.getElementById('comment-modal').style.display='none'">✖</button>
+        <h3>💬 Comments</h3>
+        <div id="comment-list"></div>
+        <div style="display:flex; gap:10px;">
+            <input type="text" id="cmt-input" class="search-box" style="margin:0;" placeholder="Write a comment...">
+            <button class="btn-main" style="width:auto; padding:0 20px;" onclick="sendComment()">Send</button>
+        </div>
+    </div>
+</div>
+
 <!-- ALL VIDEOS PAGE (HOME) -->
 <div id="page-home" class="page active">
+    <!-- NEW: TOP SLIDER -->
+    <div class="slider-title">🔥 <span class="lang-bn">টপ ট্রেন্ডিং ভিডিও</span><span class="lang-en">Top Trending Videos</span></div>
+    <div class="slider-container" id="top-slider"></div>
+
     <input type="text" id="search-bar" class="search-box bn-pl" placeholder="🔍 Search all videos..." onkeyup="handleSearch('home')">
     <div id="home-video-list"></div>
     <div class="pagination" id="home-pagination"></div>
@@ -1000,6 +1063,12 @@ HTML_TEMPLATE = """
     <input type="text" id="search-bar-prem" class="search-box bn-pl" placeholder="🔍 Search Premium Videos..." onkeyup="handleSearch('prem')">
     <div id="prem-video-list"></div>
     <div class="pagination" id="prem-pagination"></div>
+</div>
+
+<!-- HISTORY PAGE -->
+<div id="page-history" class="page">
+    <h2 style="margin-top:0;">🕒 <span class="lang-bn">আপনার দেখা ভিডিও</span><span class="lang-en">Watch History</span></h2>
+    <div id="history-video-list"></div>
 </div>
 
 <!-- VIP PLANS PAGE -->
@@ -1070,8 +1139,8 @@ HTML_TEMPLATE = """
     <div class="set-item" onclick="switchNav('coupon')">
         <div class="set-icon" style="background: linear-gradient(135deg, #a18cd1, #fbc2eb);">🎟</div>
         <div>
-            <b style="display:block; font-size:16px;"><span class="lang-bn">কুপন কোড</span><span class="lang-en">Coupon Code</span></b>
-            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড রিডিম করে ফ্রি কয়েন নিন</span><span class="lang-en">Redeem to get free coins</span></span>
+            <b style="display:block; font-size:16px;"><span class="lang-bn">কুপন কোড (রিডিম)</span><span class="lang-en">Redeem Coupon</span></b>
+            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড দিয়ে ফ্রি কয়েন বা VIP নিন</span><span class="lang-en">Redeem to get free coins/VIP</span></span>
         </div>
     </div>
     
@@ -1079,7 +1148,7 @@ HTML_TEMPLATE = """
         <div class="set-icon" style="background: linear-gradient(135deg, #ffecd2, #fcb69f);">🎁</div>
         <div>
             <b style="display:block; font-size:16px;"><span class="lang-bn">বন্ধুকে শেয়ার করুন</span><span class="lang-en">Share with Friends</span></b>
-            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">ইনভাইট করে ফ্রি কয়েন জিতুন</span><span class="lang-en">Invite and win free coins</span></span>
+            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">ইনভাইট করে বোনাস জিতুন</span><span class="lang-en">Invite and win bonus</span></span>
         </div>
     </div>
 </div>
@@ -1087,6 +1156,11 @@ HTML_TEMPLATE = """
 <!-- SUB PAGES -->
 <div id="page-coupon" class="page">
     <h2 style="margin-top:0;">🎟 <span class="lang-bn">কুপন কোড</span><span class="lang-en">Coupon Code</span></h2>
+    <!-- NEW TEXT: Coupon benefits -->
+    <p style="font-size:13px; color:#aaa; margin-bottom:20px;">
+        <span class="lang-bn">এখানে অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি সরাসরি আপনার অ্যাকাউন্টে <b>ফ্রি কয়েন</b> অথবা <b>VIP মেম্বারশিপ</b> পেয়ে যাবেন!</span>
+        <span class="lang-en">Enter the secret code given by admin to instantly receive <b>Free Coins</b> or <b>VIP Membership</b>!</span>
+    </p>
     <div style="display:flex; gap:10px; margin-bottom:20px;">
         <input type="text" id="coupon-input" class="search-box" style="margin:0; border-radius:12px;" placeholder="Enter coupon">
         <button class="btn-main" style="width:auto; margin:0; padding:0 25px;" onclick="redeemCoupon()">Redeem</button>
@@ -1096,8 +1170,9 @@ HTML_TEMPLATE = """
 <div id="page-share" class="page">
     <h2 style="margin-top:0;">🎁 <span class="lang-bn">শেয়ার করুন</span><span class="lang-en">Share</span></h2>
     <div class="share-banner">
-        <span class="lang-bn">🥳 বন্ধু আপনার লিংক দিয়ে স্টার্ট করলেই <b style="color:#ffb703;">বোনাস</b> পাবেন!</span>
-        <span class="lang-en">🥳 Get <b style="color:#ffb703;">Bonus</b> when a friend starts using your link!</span>
+        <!-- NEW TEXT: {{ ref_coin }} added -->
+        <span class="lang-bn">🥳 বন্ধু আপনার লিংক দিয়ে স্টার্ট করলেই <b style="color:#ffb703;">{{ ref_coin }} কয়েন</b> বোনাস পাবেন!</span>
+        <span class="lang-en">🥳 Get <b style="color:#ffb703;">{{ ref_coin }} Coins</b> bonus when a friend starts using your link!</span>
     </div>
     <div class="ref-box">
         <input type="text" id="ref-link" readonly>
@@ -1110,6 +1185,7 @@ HTML_TEMPLATE = """
     <div class="nav-item active" onclick="switchNav('home', this)"><span>🏠</span> All Vids</div>
     <div class="nav-item" onclick="switchNav('regvids', this)"><span>👤</span> Regular</div>
     <div class="nav-item" onclick="switchNav('premvids', this)"><span>💎</span> VIP Vids</div>
+    <div class="nav-item" onclick="switchNav('history', this)"><span>🕒</span> History</div>
     <div class="nav-item" onclick="switchNav('premium', this)"><span>🛒</span> Buy VIP</div>
     <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Setting</div>
 </div>
@@ -1126,6 +1202,7 @@ HTML_TEMPLATE = """
     document.getElementById('ref-link').value = `https://t.me/${botUsername}?start=${userId}`;
     
     let userBalance = 0;
+    let userHistory = []; // NEW: Array for history
     
     // LANGUAGE LOGIC
     let currentLang = localStorage.getItem('appLang') || 'bn';
@@ -1148,6 +1225,7 @@ HTML_TEMPLATE = """
         let res = await fetch('/api/user/' + userId);
         let data = await res.json();
         userBalance = data.balance;
+        userHistory = data.history || []; // NEW
         
         document.getElementById('hdr-balance').innerText = userBalance;
         document.getElementById('set-balance').innerText = userBalance;
@@ -1169,6 +1247,7 @@ HTML_TEMPLATE = """
             memBox.style.color = '#fff';
             document.getElementById('mem-expiry').style.display = 'none';
         }
+        renderHistory(); // NEW
     }
     loadUser();
 
@@ -1199,6 +1278,21 @@ HTML_TEMPLATE = """
     let allFiles = {{ files_json | safe }};
     let state = { home: { p: 1, lim: 20, q: "" }, reg: { p: 1, lim: 20, q: "" }, prem: { p: 1, lim: 20, q: "" } };
 
+    // NEW: SLIDER LOGIC
+    function renderSlider() {
+        let sorted = [...allFiles].sort((a,b) => (b.views||0) - (a.views||0)).slice(0, 8);
+        let html = "";
+        sorted.forEach(f => {
+            html += `<div class="slider-card">
+                <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
+                <div class="slider-play" onclick="playVideo('${f._id}')"></div>
+                <div class="s-title">${f.title}</div>
+            </div>`;
+        });
+        document.getElementById('top-slider').innerHTML = html;
+    }
+    renderSlider();
+
     function renderPagination(tab, total) {
         let s = state[tab];
         let maxP = Math.ceil(total / s.lim) || 1;
@@ -1219,6 +1313,24 @@ HTML_TEMPLATE = """
         document.getElementById(`${tab}-pagination`).innerHTML = html;
     }
 
+    function createCard(f) {
+        let tag = f.is_premium ? '<div class="tag-premium">💎 VIP</div>' : '<div class="tag-regular">👤 Regular</div>';
+        return `<div class="video-card">
+            <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
+            ${tag}
+            <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
+            <div class="video-info">
+                <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title} <small style="color:#00d4ff;">[ID: ${f._id}]</small></b>
+                <small style="color:#aaa;">👁 ${f.views || 0} views</small>
+            </div>
+            <div class="video-actions">
+                <button onclick="likeVideo('${f._id}')">❤️ <span id="like-${f._id}">${f.likes || 0}</span></button>
+                <button onclick="openComments('${f._id}')">💬 Comment</button>
+                <button onclick="shareVideo('${f._id}')">↗️ Share</button>
+            </div>
+        </div>`;
+    }
+
     function renderList(tab) {
         let s = state[tab];
         let filtered = allFiles.filter(f => {
@@ -1234,19 +1346,17 @@ HTML_TEMPLATE = """
         if(pageFiles.length === 0) html = "<p style='text-align:center; color:#666;'>No videos found!</p>";
         
         pageFiles.forEach(f => {
-            let tag = f.is_premium ? '<div class="tag-premium">💎 VIP</div>' : '<div class="tag-regular">👤 Regular</div>';
-            html += `<div class="video-card">
-                <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
-                ${tag}
-                <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
-                <div class="video-info">
-                    <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title} <small style="color:#00d4ff;">[ID: ${f._id}]</small></b>
-                    <small style="color:#aaa;">👁 ${f.views} views</small>
-                </div>
-            </div>`;
+            html += createCard(f);
         });
         document.getElementById(`${tab}-video-list`).innerHTML = html;
         renderPagination(tab, filtered.length);
+    }
+
+    function renderHistory() {
+        let histFiles = allFiles.filter(f => userHistory.includes(f._id));
+        let html = histFiles.length === 0 ? "<p style='text-align:center; color:#666;'>No history yet!</p>" : "";
+        histFiles.reverse().forEach(f => { html += createCard(f); });
+        document.getElementById('history-video-list').innerHTML = html;
     }
 
     function handleSearch(tab) { 
@@ -1263,6 +1373,42 @@ HTML_TEMPLATE = """
     renderList('reg');
     renderList('prem');
 
+    // NEW ACTIONS LOGIC
+    async function likeVideo(id) {
+        let span = document.getElementById(`like-${id}`);
+        span.innerText = parseInt(span.innerText) + 1;
+        await fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'like', uid:userId, file_id:id}) });
+    }
+    function shareVideo(id) {
+        let link = `https://t.me/${botUsername}?start=file_${id}`;
+        navigator.clipboard.writeText(link);
+        tg.showAlert(currentLang === 'bn' ? "✅ ভিডিও লিংক কপি হয়েছে! বন্ধুদের সাথে শেয়ার করুন।" : "✅ Video link copied! Share with friends.");
+    }
+    
+    let currentCommentId = null;
+    function openComments(id) {
+        currentCommentId = id;
+        let file = allFiles.find(f => f._id === id);
+        let list = document.getElementById('comment-list');
+        list.innerHTML = "";
+        let comments = file.comments || [];
+        if(comments.length === 0) list.innerHTML = "<p style='color:#777; font-size:12px;'>No comments yet.</p>";
+        comments.forEach(c => { list.innerHTML += `<div class="cmt-item"><b>User ${c.uid}:</b> ${c.text} <br><small style="color:#666;">${c.time}</small></div>`; });
+        document.getElementById('comment-modal').style.display = 'flex';
+    }
+    
+    async function sendComment() {
+        let text = document.getElementById('cmt-input').value;
+        if(!text) return;
+        document.getElementById('cmt-input').value = "";
+        let res = await fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'comment', uid:userId, file_id:currentCommentId, text:text}) });
+        let data = await res.json();
+        let file = allFiles.find(f => f._id === currentCommentId);
+        if(!file.comments) file.comments = [];
+        file.comments.push(data.comment);
+        openComments(currentCommentId);
+    }
+
     // --- ADS ANTI-CHEAT TIMER ---
     let currentDeepLink = "";
     let adDataGlobal = null;
@@ -1272,6 +1418,14 @@ HTML_TEMPLATE = """
     async function playVideo(fileId) {
         cFileId = fileId;
         currentDeepLink = `https://t.me/${botUsername}?start=file_${fileId}`;
+
+        // Add to history
+        if(!userHistory.includes(fileId)) {
+            userHistory.push(fileId);
+            fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'history', uid:userId, file_id:fileId}) });
+            renderHistory();
+        }
+
         let res = await fetch(`/api/get_ad/${userId}/${fileId}`);
         adDataGlobal = await res.json();
 
@@ -1375,7 +1529,7 @@ def home():
     files = list(sync_db["files"].find().sort("_id", -1)) 
     for f in files: f["_id"] = str(f["_id"]) 
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
-    return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=config, site_name=config.get("site_name", "Glow Top"))
+    return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=config, site_name=config.get("site_name", "Glow Top"), ref_coin=config.get("ref_coin", 10))
 
 # ==========================================
 # 9. RUN LOGIC (SAFE & ROBUST)
