@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 loop = asyncio.new_event_loop() 
 asyncio.set_event_loop(loop)
 
-from bot import web as app
 from pyrogram import Client, filters, idle 
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo 
 from pyrogram.errors import UserNotParticipant, FloodWait 
