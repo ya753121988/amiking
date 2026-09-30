@@ -6,3 +6,9 @@ flask==3.0.0
 dnspython==2.4.2
 requests
 opencv-python-headless
+pyrogram
+flask
+motor
+pymongo
+requests
+tgcrypto
