@@ -58,7 +58,7 @@ async def get_config():
     await get_db() 
     conf = await config_col.find_one({"_id": "settings"}) 
     if not conf: 
-        conf = { "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে। / File will be auto-deleted after some time.", "frotect": False, "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1, "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME, "autovid_msg_id": None, "autovid_time_min": 0, "autopost_time_hr": 0, "autopost_idx": 0, "site_name": "Glow Top" } 
+        conf = { "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে। / File will be auto-deleted after some time.", "frotect": False, "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1, "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME, "autovid_msg_id": None, "autovid_chat_id": None, "autovid_time_min": 0, "autopost_time_hr": 0, "autopost_idx": 0, "site_name": "Glow Top" } 
         await config_col.insert_one(conf) 
     return conf
 
@@ -130,7 +130,8 @@ def get_extra_dbs_sync():
 # 3. BACKGROUND TASKS
 # ==========================================
 async def background_tasks(): 
-    last_autovid, last_autopost = time.time(), time.time() 
+    last_autovid = time.time()
+    last_autopost = time.time() 
     while True: 
         await asyncio.sleep(60) 
         now = time.time() 
@@ -138,20 +139,22 @@ async def background_tasks():
             config = await get_config() 
             av_min = config.get("autovid_time_min", 0) 
             if av_min > 0 and config.get("autovid_msg_id") and (now - last_autovid) >= (av_min * 60): 
+                last_autovid = time.time() # Moved up to prevent spam loop on error
                 users = await users_col.find().to_list(None) 
+                from_chat = config.get("autovid_chat_id", ADMIN_ID)
                 for u in users: 
                     if u.get("last_autovid_msg"):
                         try: await app.delete_messages(u["_id"], u["last_autovid_msg"]) 
                         except: pass
                     try: 
-                        msg = await app.copy_message(u["_id"], ADMIN_ID, config["autovid_msg_id"])
+                        msg = await app.copy_message(u["_id"], from_chat, config["autovid_msg_id"])
                         await users_col.update_one({"_id": u["_id"]}, {"$set": {"last_autovid_msg": msg.id}}) 
                         await asyncio.sleep(0.05) 
                     except: pass 
-                last_autovid = time.time()
 
             ap_hr = config.get("autopost_time_hr", 0)
             if ap_hr > 0 and (now - last_autopost) >= (ap_hr * 3600):
+                last_autopost = time.time() # Moved up to prevent spam loop on error
                 idx = config.get("autopost_idx", 0)
                 
                 # Fetching files from all DBs for auto-post
@@ -170,7 +173,6 @@ async def background_tasks():
                             await asyncio.sleep(0.05)
                         except: pass
                     await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_idx": idx + 1}})
-                last_autopost = time.time()
         except Exception as e: print("BG Task Error:", e)
 
 # ==========================================
@@ -532,7 +534,9 @@ async def cmd_logo(c, m):
 async def cmd_autvid(c, m): 
     await get_db(); 
     if m.reply_to_message: 
-        await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id}}); await m.reply("✅ Auto Vid Msg Set!")
+        # Fix: Storing chat.id so we can copy from any chat including private
+        await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id, "autovid_chat_id": m.chat.id}})
+        await m.reply("✅ Auto Vid Msg Set!")
     else: await m.reply("❌ কোনো মেসেজ/ভিডিওতে রিপ্লাই করে `/autvid` দিন।")
 
 @app.on_message(filters.command("autvidti") & filters.user(ADMIN_ID)) 
@@ -1161,10 +1165,12 @@ HTML_TEMPLATE = """
         await fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'like', uid:userId, file_id:id}) });
     }
     
+    // 🔥 SHARE BUTTON FIX
     function shareVideo(id) {
         let link = `https://t.me/${botUsername}?start=ref${userId}file${id}`;
-        navigator.clipboard.writeText(link);
-        tg.showAlert(currentLang === 'bn' ? "✅ লিংক কপি হয়েছে! এটি শেয়ার করলে আপনি রেফার বোনাস পাবেন।" : "✅ Link copied! Share this to get refer bonus.");
+        let text = currentLang === 'bn' ? "🔥 এই দারুণ ভিডিওটি দেখুন!" : "🔥 Watch this awesome video!";
+        let shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
+        tg.openTelegramLink(shareUrl);
     }
     
     let currentCommentId = null;
@@ -1299,8 +1305,12 @@ def home():
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
     return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=config, site_name=config.get("site_name", "Glow Top"), ref_coin=config.get("ref_coin", 10))
 
+# 🔥 Vercel Deployment এর জন্য web ভেরিয়েবল প্রয়োজন তাই alias করা হলো
+app_flask = web 
+
 def run_flask(): 
-    web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
+    port = int(os.environ.get("PORT", 8080))
+    web.run(host="0.0.0.0", port=port, debug=False)
 
 async def main_bot(): 
     await get_db() 
