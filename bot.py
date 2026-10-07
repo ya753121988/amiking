@@ -27,6 +27,28 @@ from pymongo import MongoClient
 from bson.objectid import ObjectId
 
 # ==========================================
+# 🛑 Pyrogram Double Message Filter 🛑
+# ==========================================
+processed_msgs = set()
+def is_unique_func(_, __, m):
+    if not hasattr(m, "id"): return True
+    if m.id in processed_msgs: return False
+    processed_msgs.add(m.id)
+    if len(processed_msgs) > 10000: processed_msgs.clear()
+    return True
+unique_msg = filters.create(is_unique_func)
+
+processed_cbs = set()
+def is_unique_cb(_, __, q):
+    if not hasattr(q, "id"): return True
+    if q.id in processed_cbs: return False
+    processed_cbs.add(q.id)
+    if len(processed_cbs) > 10000: processed_cbs.clear()
+    return True
+unique_cb = filters.create(is_unique_cb)
+
+
+# ==========================================
 # 1. CONFIGURATION
 # ==========================================
 API_ID = int(os.environ.get("API_ID", 29904834)) 
@@ -51,18 +73,19 @@ web = Flask(__name__)
 admin_steps = {}
 
 db_client, db = None, None 
-users_col, files_col, cats_col = None, None, None
+users_col, files_col, cats_col, tasks_col = None, None, None, None
 pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col = None, None, None, None, None, None 
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["ShilaCallApp"]
 
 async def get_db(): 
-    global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col
+    global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col, tasks_col
     if db_client is None:
         db_client = AsyncIOMotorClient(MONGO_URI) 
         db = db_client["ShilaCallApp"]
         users_col, files_col, cats_col = db["users"], db["files"], db["categories"]
         pkgs_col, links_col, config_col = db["packages"], db["ad_links"], db["config"]
         channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"] 
+        tasks_col = db["custom_tasks"]
     return db
 
 async def get_config(): 
@@ -70,7 +93,7 @@ async def get_config():
     conf = await config_col.find_one({"_id": "settings"}) 
     if not conf: 
         conf = { "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে। / File will be auto-deleted after some time.", "frotect": False, "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1, "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME, "autovid_msg_id": None, "autovid_chat_id": None, "autovid_time_min": 0, "autopost_time_hr": 0, "autopost_idx": 0, "site_name": "Glow Top", 
-                 "premium_vid_coin": 50, "vid_relock_min": 1440, "spin_coin_min": 10, "spin_coin_max": 50, "task_coin": 20 } 
+                 "premium_vid_coin": 50, "vid_relock_min": 1440, "spin_coin_min": 10, "spin_coin_max": 50, "task_coin": 20, "spin_limit": 5, "task_limit": 5 } 
         await config_col.insert_one(conf) 
     return conf
 
@@ -188,11 +211,11 @@ async def background_tasks():
 # ==========================================
 # 4. BOT COMMANDS
 # ==========================================
-@app.on_message(filters.command("myid")) 
+@app.on_message(filters.command("myid") & unique_msg) 
 async def cmd_myid(c, m): 
     await m.reply(f"✅ বট একদম ঠিকভাবে কাজ করছে! / Bot is working perfectly!\n🆔 আপনার আইডি / Your ID: {m.from_user.id}")
 
-@app.on_message(filters.command("cmd") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("cmd") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_list(c, m):
     text = """
     🛠 **সকল কমান্ড লিস্ট / All Commands List:**
@@ -204,9 +227,15 @@ async def cmd_list(c, m):
 
 🔸 **File Management:**
 `/addfile` - ম্যানুয়ালি ফাইল যোগ করুন (Step-by-step)
-`/auto` - ভিডিওতে রিপ্লাই করে অটো ফাইল + 4x4 থাম্বনেইল গ্রিড তৈরি ও অটো ক্যাপশন সেট করতে।
+`/auto` - ভিডিওতে রিপ্লাই করে অটো ফাইল + 4x2 (৮ পিক) থাম্বনেইল গ্রিড তৈরি ও অটো ক্যাপশন সেট করতে।
 `/delfile <file_id>` - ফাইল ডিলিট করতে
 `/delall` - সকল ডাটাবেসের সব ফাইল ডিলিট করতে
+
+🔸 **Tasks & Spin limits:**
+`/spinlimit <Num>` - ইউজারের ডেইলি স্পিন লিমিট (ex: /spinlimit 5)
+`/tasklimit <Num>` - ইউজারের ডেইলি ডিফল্ট টাস্ক লিমিট
+`/addtask <Title> | <Link> | <Coin>` - নতুন কাস্টম আনলিমিটেড টাস্ক অ্যাড
+`/deltask` - কাস্টম টাস্ক ডিলিট করতে
 
 🔸 **Database (MongoDB) Manager:**
 `/mongo <uri>` - নতুন ডাটাবেস যোগ করতে
@@ -243,7 +272,7 @@ async def cmd_list(c, m):
     """
     await m.reply(text)
 
-@app.on_message(filters.command("stats") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("stats") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_stats(c, m): 
     await get_db() 
     t_u = await users_col.count_documents({}) 
@@ -255,7 +284,7 @@ async def cmd_stats(c, m):
     
     await m.reply(f"📊 Statistics:\n\n👥 Users: {t_u}\n🎬 Total Files: {t_f}\n💎 Premium: {p_u}\n👤 Regular: {t_u - p_u}\n🗄 Attached MongoDBs: {len(dbs)}")
 
-@app.on_message(filters.command("name") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("name") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_name(c, m):
     new_name = m.text.replace("/name", "").strip()
     if not new_name: return await m.reply("❌ সঠিক নিয়ম: `/name <Site_Name>`\nউদাহরণ: `/name MySite`")
@@ -263,7 +292,7 @@ async def cmd_name(c, m):
     await config_col.update_one({"_id": "settings"}, {"$set": {"site_name": new_name}})
     await m.reply(f"✅ সাইটের নাম পরিবর্তন করা হয়েছে / Site name changed to: {new_name}")
 
-@app.on_message(filters.command("start") & filters.private) 
+@app.on_message(filters.command("start") & filters.private & unique_msg) 
 async def start_cmd(client, message): 
     await get_db() 
     uid = message.from_user.id 
@@ -287,7 +316,12 @@ async def start_cmd(client, message):
 
     user = await users_col.find_one({"_id": uid})
     if not user:
-        await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": [], "unlocked_files": {}})
+        await users_col.insert_one({
+            "_id": uid, "name": message.from_user.first_name, 
+            "balance": 0, "pending_file": None, "premium_until": None, 
+            "history": [], "unlocked_files": {}, 
+            "spin_count": 0, "task_count": 0, "last_activity_date": None
+        })
         if ref_by and ref_by != uid:
             if config.get("ref_on", True):
                 await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
@@ -358,7 +392,7 @@ async def start_cmd(client, message):
         except: await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
-@app.on_callback_query(filters.regex("check_join")) 
+@app.on_callback_query(filters.regex("check_join") & unique_cb) 
 async def check_join_cb(c, q): 
     await get_db() 
     for ch in await channels_col.find({"type": "must_join"}).to_list(100): 
@@ -376,7 +410,7 @@ async def check_join_cb(c, q):
 # ==========================================
 # 5. ADMIN FILE UPLOAD & MULTI-MONGO
 # ==========================================
-@app.on_message(filters.command("addfile") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addfile") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addfile(c, m): 
     admin_steps[m.from_user.id] = {"step": "name"} 
     await m.reply("১. ফাইলের নাম/টাইটেল দিন: \n(1. Enter File Name/Title:)")
@@ -384,13 +418,13 @@ async def cmd_addfile(c, m):
 def is_in_step(step): 
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step)
 
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("name") & ~filters.command(["start", "myid", "cmd"])) 
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("name") & ~filters.command(["start", "myid", "cmd"]) & unique_msg) 
 async def handle_admin_name(c, m): 
     admin_steps[m.from_user.id]["title"] = m.text 
     admin_steps[m.from_user.id]["step"] = "thumb" 
     await m.reply("২. এবার ফাইলের ছবি বা লোগো দিন (Photo বা Document আকারে সেন্ড করুন):\n(2. Now send File Thumbnail/Photo/Document:)")
 
-@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("thumb")) 
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("thumb") & unique_msg) 
 async def handle_admin_photo(c, m): 
     msg = await m.reply("⏳ ছবি ডাটাবেসে সেভ করা হচ্ছে... / Saving image to Database...") 
     path = await m.download() 
@@ -410,13 +444,13 @@ async def handle_admin_photo(c, m):
     btns = [[InlineKeyboardButton("💎 Premium Video", callback_data="ftype_prem")], [InlineKeyboardButton("👤 Regular Video", callback_data="ftype_reg")]]
     await msg.edit_text("ভিডিওটি কি প্রিমিয়াম নাকি রেগুলার? / Is it Premium or Regular?", reply_markup=InlineKeyboardMarkup(btns))
 
-@app.on_callback_query(filters.regex(r"^ftype_") & filters.user(ADMIN_ID)) 
+@app.on_callback_query(filters.regex(r"^ftype_") & filters.user(ADMIN_ID) & unique_cb) 
 async def filetype_cb(c, q): 
     admin_steps[q.from_user.id]["is_premium"] = (q.data == "ftype_prem") 
     admin_steps[q.from_user.id]["step"] = "file" 
     await q.message.edit_text("✅ ৩. এবার মূল ফাইল (Video/Document) দিন:\n(3. Now send the main Video/File:)")
 
-@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("file")) 
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("file") & unique_msg) 
 async def handle_admin_file(c, m): 
     msg = await m.reply("⏳ ফাইল সেভ করা হচ্ছে... / Saving file...") 
     short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) 
@@ -440,8 +474,8 @@ async def handle_admin_file(c, m):
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
 
-# --- UPDATED AUTO UPLOAD SYSTEM WITH 4x2 GRID & AUTO CAPTION ---
-@app.on_message(filters.command("auto") & filters.user(ADMIN_ID))
+# --- UPDATED AUTO UPLOAD SYSTEM WITH 4x2 GRID (8 PICS) & AUTO CAPTION ---
+@app.on_message(filters.command("auto") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_auto_upload(c, m):
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document):
         return await m.reply("❌ কোনো ভিডিও বা ডকুমেন্টে রিপ্লাই করে `/auto` দিন।\n(Reply to a video with /auto)")
@@ -477,8 +511,8 @@ async def cmd_auto_upload(c, m):
         video_path = await c.download_media(media.file_id)
         grid_path = f"{video_path}_grid.jpg"
         
-        # FFmpeg command to extract 8 frames and make a 4x2 grid (4 columns, 2 rows)
-        cmd_safe = f'ffmpeg -y -i "{video_path}" -vf "thumbnail=n=50,scale=320:-1,tile=4x2" -frames:v 1 -q:v 2 "{grid_path}"'
+        # FFmpeg command FIXED: Ensures exactly 8 frames (4x2) spread across video
+        cmd_safe = f'ffmpeg -y -i "{video_path}" -vf "thumbnail=n=20,scale=320:-1,tile=4x2" -frames:v 1 -q:v 2 "{grid_path}"'
         
         process = await asyncio.create_subprocess_shell(cmd_safe, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await process.communicate()
@@ -507,7 +541,7 @@ async def cmd_auto_upload(c, m):
             [InlineKeyboardButton("👤 Regular Video", callback_data="auto_reg")]]
     await msg.edit_text(f"✅ **নাম:** {title}\n\nভিডিওটি কি প্রিমিয়াম নাকি রেগুলার কোথায় অ্যাড হবে? / Where to add this video?", reply_markup=InlineKeyboardMarkup(btns))
 
-@app.on_callback_query(filters.regex(r"^auto_") & filters.user(ADMIN_ID))
+@app.on_callback_query(filters.regex(r"^auto_") & filters.user(ADMIN_ID) & unique_cb)
 async def auto_type_cb(c, q):
     step_data = admin_steps.get(q.from_user.id)
     if not step_data or step_data.get("step") != "auto_wait":
@@ -537,7 +571,7 @@ async def auto_type_cb(c, q):
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await q.message.edit_text(f"✅ অটো আপলোড সফল! / Auto Upload Success!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
 
-@app.on_message(filters.command("delfile") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delfile") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delfile(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/delfile <file_id>`\nউদাহরণ: `/delfile AbCd123`")
     f_id = m.text.split()[1]
@@ -550,13 +584,13 @@ async def cmd_delfile(c, m):
     if deleted: await m.reply("✅ ফাইল ডিলিট হয়েছে! / File Deleted!") 
     else: await m.reply("❌ ফাইল পাওয়া যায়নি! / File Not Found!")
 
-@app.on_message(filters.command("delall") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delall") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delall(c, m): 
     for d in await get_extra_dbs_async(): await d["files"].delete_many({})
     await m.reply("✅ সকল ফাইল ডিলিট করা হয়েছে! / All files deleted from all DBs!")
 
 # --- MONGODB MANAGER COMMANDS ---
-@app.on_message(filters.command("mongo") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("mongo") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_mongo(c, m):
     args = m.text.split()
     if len(args) < 2: return await m.reply("❌ সঠিক নিয়ম: `/mongo <mongodb_uri>`\nউদাহরণ: `/mongo mongodb+srv://...`")
@@ -571,7 +605,7 @@ async def cmd_mongo(c, m):
     except Exception as e:
         await msg.edit_text(f"❌ MongoDB কানেক্ট করতে ব্যর্থ হয়েছে!\nError: {e}")
 
-@app.on_message(filters.command("delmongo") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("delmongo") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_delmongo(c, m):
     await get_db()
     dbs = await mongos_col.find().to_list(None)
@@ -579,7 +613,7 @@ async def cmd_delmongo(c, m):
     btns = [[InlineKeyboardButton(f"❌ {db['uri'][:25]}...", callback_data=f"delmongo_{db['_id']}")] for db in dbs]
     await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns))
 
-@app.on_callback_query(filters.regex(r"^delmongo_") & filters.user(ADMIN_ID))
+@app.on_callback_query(filters.regex(r"^delmongo_") & filters.user(ADMIN_ID) & unique_cb)
 async def delmongo_cb(c, q):
     await get_db()
     db_id = q.data.split("_")[1]
@@ -592,7 +626,7 @@ async def delmongo_cb(c, q):
     else:
         await q.message.edit_text("❌ পাওয়া যায়নি! / Not found!")
 
-@app.on_message(filters.command("mongostats") & filters.user(ADMIN_ID))
+@app.on_message(filters.command("mongostats") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_mongostats(c, m):
     msg = await m.reply("⏳ তথ্য সংগ্রহ করা হচ্ছে... / Fetching stats...")
     dbs = await get_extra_dbs_async()
@@ -618,101 +652,134 @@ async def cmd_mongostats(c, m):
 # ==========================================
 # 6. OTHER ADMIN COMMANDS
 # ==========================================
-@app.on_message(filters.command("setpremcoin") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("setpremcoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_setpremcoin(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/setpremcoin <Coin>`\nউদাহরণ: `/setpremcoin 50`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"premium_vid_coin": int(m.text.split()[1])}}); await m.reply("✅ Premium Video Coin Price Set!")
 
-@app.on_message(filters.command("relocktime") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("relocktime") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_relocktime(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/relocktime <Minutes>`\nউদাহরণ: `/relocktime 1440` (1440 min = 24 hrs)")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": int(m.text.split()[1])}}); await m.reply("✅ Video Relock Time Set!")
 
-@app.on_message(filters.command("spincoin") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("spincoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_spincoin(c, m): 
     if len(m.text.split()) < 2 or "-" not in m.text: return await m.reply("❌ সঠিক নিয়ম: `/spincoin <Min-Max>`\nউদাহরণ: `/spincoin 10-50`")
     mn, mx = map(int, m.text.split()[1].split("-"))
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_coin_min": mn, "spin_coin_max": mx}}); await m.reply("✅ Spin Coin Range Set!")
 
-@app.on_message(filters.command("taskcoin") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("taskcoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_taskcoin(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/taskcoin <Coin>`\nউদাহরণ: `/taskcoin 20`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"task_coin": int(m.text.split()[1])}}); await m.reply("✅ Task Coin Reward Set!")
 
-@app.on_message(filters.command("prstep") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("spinlimit") & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_spinlimit(c, m):
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/spinlimit <Num>`\nউদাহরণ: `/spinlimit 5`")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_limit": int(m.text.split()[1])}}); await m.reply("✅ User Daily Spin Limit Set!")
+
+@app.on_message(filters.command("tasklimit") & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_tasklimit(c, m):
+    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/tasklimit <Num>`\nউদাহরণ: `/tasklimit 5`")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"task_limit": int(m.text.split()[1])}}); await m.reply("✅ User Daily Default Task Limit Set!")
+
+@app.on_message(filters.command("addtask") & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_addtask(c, m):
+    try:
+        parts = m.text.replace("/addtask", "").strip().split("|")
+        title, link, coin = parts[0].strip(), parts[1].strip(), int(parts[2].strip())
+        await get_db()
+        await tasks_col.insert_one({"title": title, "link": link, "coin": coin})
+        await m.reply(f"✅ কাস্টম আনলিমিটেড টাস্ক অ্যাড হয়েছে!\nTitle: {title}\nCoin: {coin}")
+    except:
+        await m.reply("❌ সঠিক নিয়ম: `/addtask <Title> | <Link> | <Coins>`\nউদাহরণ: `/addtask Join Telegram | https://t.me/abc | 50`")
+
+@app.on_message(filters.command("deltask") & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_deltask(c, m):
+    await get_db()
+    tsks = await tasks_col.find().to_list(100)
+    if not tsks: return await m.reply("❌ কোনো টাস্ক নেই!")
+    btns = [[InlineKeyboardButton(f"❌ {t['title']} ({t['coin']}C)", callback_data=f"deltask_{t['_id']}")] for t in tsks]
+    await m.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^deltask_") & filters.user(ADMIN_ID) & unique_cb)
+async def deltask_cb(c, q):
+    await get_db(); await tasks_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ Task Deleted!")
+
+@app.on_message(filters.command("prstep") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_prstep(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/prstep <step>`\nউদাহরণ: `/prstep 2`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"prstep": int(m.text.split()[1])}}); await m.reply("✅ Premium Ad Steps Set!")
 
-@app.on_message(filters.command("regstep") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("regstep") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_regstep(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/regstep <step>`\nউদাহরণ: `/regstep 1`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"regstep": int(m.text.split()[1])}}); await m.reply("✅ Regular Ad Steps Set!")
 
-@app.on_message(filters.command("addadmin") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addadmin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addadmin(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/addadmin <username>`\nউদাহরণ: `/addadmin Sudo_king`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"payment_admin": m.text.split()[1].replace("@", "")}}); await m.reply("✅ Payment Admin Set!")
 
-@app.on_message(filters.command("addlink") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addlink") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addlink(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/addlink <link>`\nউদাহরণ: `/addlink https://adlink.com/...`")
     await get_db(); await links_col.insert_one({"link": m.text.split()[1]}); await m.reply("✅ Ad Link Added!")
 
-@app.on_message(filters.command("delink") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delink") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_dellink(c, m): 
     await get_db() 
     btns = [[InlineKeyboardButton(f"❌ {l['link'][:20]}...", callback_data=f"dellink_{l['_id']}")] for l in await links_col.find().to_list(100)] 
     await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
-@app.on_callback_query(filters.regex(r"^dellink_") & filters.user(ADMIN_ID))
+@app.on_callback_query(filters.regex(r"^dellink_") & filters.user(ADMIN_ID) & unique_cb)
 async def dellink_cb(c, q): 
     await get_db(); await links_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ Ad Link Deleted!")
 
-@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addcnl(c, m): 
     if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/addcnl <Name> <Link>`\nউদাহরণ: `/addcnl MyChannel https://t.me/...`")
     await get_db(); p = m.text.split(maxsplit=2); await channels_col.insert_one({"type": "inline", "name": p[1], "link": p[2]}); await m.reply("✅ Inline Channel added!")
 
-@app.on_message(filters.command("delcnl") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delcnl") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delcnl(c, m): 
     await get_db() 
     btns = [[InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"delch_{ch['_id']}")] for ch in await channels_col.find({"type": "inline"}).to_list(100)] 
     await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
-@app.on_message(filters.command("vercnl") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("vercnl") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_vercnl(c, m): 
     if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/vercnl <ChatID> <Link>`\nউদাহরণ: `/vercnl -10012345678 https://t.me/...`")
     await get_db(); p = m.text.split(); await channels_col.insert_one({"type": "must_join", "chat_id": int(p[1]), "link": p[2]}); await m.reply("✅ Must Join Channel Added!")
 
-@app.on_message(filters.command("delvrcnl") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delvrcnl") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delvrcnl(c, m): 
     await get_db() 
     btns = [[InlineKeyboardButton(f"❌ {ch['chat_id']}", callback_data=f"delch_{ch['_id']}")] for ch in await channels_col.find({"type": "must_join"}).to_list(100)] 
     await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
-@app.on_callback_query(filters.regex(r"^delch_") & filters.user(ADMIN_ID)) 
+@app.on_callback_query(filters.regex(r"^delch_") & filters.user(ADMIN_ID) & unique_cb) 
 async def delch_cb(c, q): 
     await get_db(); await channels_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ Channel Deleted!")
 
-@app.on_message(filters.command("addtex") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addtex") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addtex(c, m): 
     tex = m.text.replace("/addtex", "").strip()
     if not tex: return await m.reply("❌ সঠিক নিয়ম: `/addtex <Text>`\nউদাহরণ: `/addtex স্বাগতম!`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": tex}}); await m.reply("✅ Start Text Set!")
 
-@app.on_message(filters.command("deltex") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("deltex") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_deltex(c, m): 
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": ""}}); await m.reply("✅ Start Text Deleted!")
 
-@app.on_message(filters.command("logo") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("logo") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_logo(c, m): 
     await get_db() 
     if m.reply_to_message and m.reply_to_message.photo: 
         await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": m.reply_to_message.photo.file_id}}); await m.reply("✅ Start Logo Set!")
     else: await m.reply("❌ কোনো ছবির সাথে রিপ্লাই করে `/logo` দিন।")
 
-@app.on_message(filters.command("autvid") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("autvid") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_autvid(c, m): 
     await get_db(); 
     if m.reply_to_message: 
@@ -720,72 +787,72 @@ async def cmd_autvid(c, m):
         await m.reply("✅ Auto Vid Msg Set!")
     else: await m.reply("❌ কোনো মেসেজ/ভিডিওতে রিপ্লাই করে `/autvid` দিন।")
 
-@app.on_message(filters.command("autvidti") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("autvidti") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_autvidti(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/autvidti <minutes>`\nউদাহরণ: `/autvidti 30`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_time_min": int(m.text.split()[1])}}); await m.reply("✅ Auto Vid Interval Set!")
 
-@app.on_message(filters.command("autpost") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("autpost") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_autpost(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/autpost <hours>`\nউদাহরণ: `/autpost 2`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_time_hr": int(m.text.split()[1])}}); await m.reply("✅ Auto Post Interval Set!")
 
-@app.on_message(filters.command("refbonous") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("refbonous") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_refbonous(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/refbonous <coin>`\nউদাহরণ: `/refbonous 20`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": int(m.text.split()[1]), "ref_on": True}}); await m.reply("✅ Ref Bonus Set!")
 
-@app.on_message(filters.command("refbonousoff") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("refbonousoff") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_refbonousoff(c, m): 
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"ref_on": False}}); await m.reply("✅ Ref Bonus OFF!")
 
-@app.on_message(filters.command("frotect") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("frotect") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_frotect(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/frotect <on/off>`\nউদাহরণ: `/frotect on`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": m.text.split()[1].lower() == "on"}}); await m.reply("✅ Protect Config Set!")
 
-@app.on_message(filters.command("autodel") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("autodel") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_autodel(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/autodel <seconds>`\nউদাহরণ: `/autodel 600`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"auto_del_time": int(m.text.split()[1])}}); await m.reply("✅ Auto Delete Set!")
 
-@app.on_message(filters.command("autex") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("autex") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_autex(c, m): 
     tex = m.text.replace("/autex", "").strip()
     if not tex: return await m.reply("❌ সঠিক নিয়ম: `/autex <Text>`\nউদাহরণ: `/autex নির্দিষ্ট সময় পর ডিলিট হবে।`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autodel_text": tex}}); await m.reply("✅ Auto Delete Text Set!")
 
-@app.on_message(filters.command("usd") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("usd") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_usd(c, m): 
     if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/usd <Price> <Days>`\nউদাহরণ: `/usd 5 30`")
     await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "usd", "details": f"{p[1]} USD={p[2]} Days"}); await m.reply("✅ USD Package Added!")
 
-@app.on_message(filters.command("bdt") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("bdt") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_bdt(c, m): 
     if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/bdt <Price> <Days>`\nউদাহরণ: `/bdt 100 30`")
     await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "bkash", "details": f"{p[1]} BDT={p[2]} Days"}); await m.reply("✅ BDT Package Added!")
 
-@app.on_message(filters.command("addcred") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addcred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addcred(c, m): 
     if len(m.text.split()) < 5: return await m.reply("❌ সঠিক নিয়ম: `/addcred <Coins> = <Amount> <Unit>`\nউদাহরণ: `/addcred 500 = 7 d`")
     await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "coin", "coins": int(p[1]), "amount": int(p[3]), "unit": p[4], "details": f"{p[1]} Coins={p[3]} {p[4]}"}); await m.reply("✅ Coin Package Added!")
 
-@app.on_message(filters.command("delcred") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delcred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delcred(c, m): 
     await get_db() 
     btns = [[InlineKeyboardButton(f"❌ {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in await pkgs_col.find({"type": "coin"}).to_list(100)] 
     await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
-@app.on_callback_query(filters.regex(r"^delpkg_") & filters.user(ADMIN_ID))
+@app.on_callback_query(filters.regex(r"^delpkg_") & filters.user(ADMIN_ID) & unique_cb)
 async def delpkg_cb(c, q): 
     await get_db(); await pkgs_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ Package Deleted!")
 
-@app.on_message(filters.command("prparadd") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("prparadd") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_prparadd(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/prparadd <seconds>`\nউদাহরণ: `/prparadd 10`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"prem_vid_wait": int(m.text.split()[1])}}); await m.reply("✅ Premium Vid Wait Time Set!")
 
-@app.on_message(filters.command("addrdiem") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("addrdiem") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addrdiem(c, m): 
     if len(m.text.split()) < 4: return await m.reply("❌ সঠিক নিয়ম: `/addrdiem <UserID> <Amount> <Unit>`\nউদাহরণ: `/addrdiem 12345678 30 d`")
     await get_db() 
@@ -794,12 +861,12 @@ async def cmd_addrdiem(c, m):
     await users_col.update_one({"_id": u_id}, {"$set": {"premium_until": datetime.now() + timedelta(seconds=amt * secs)}}) 
     await m.reply(f"✅ User {u_id} made Premium!"); await c.send_message(u_id, f"🎉 You received {amt} {unit} Premium!")
 
-@app.on_message(filters.command("delpremium") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("delpremium") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delpremium(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/delpremium <UserID>`\nউদাহরণ: `/delpremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(m.text.split()[1])}, {"$set": {"premium_until": None}}); await m.reply("✅ Premium Removed!")
 
-@app.on_message(filters.command("brodcast") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("brodcast") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_brodcast(c, m): 
     await get_db() 
     if not m.reply_to_message: return await m.reply("❌ Reply to a message / কোনো মেসেজে রিপ্লাই করে দিন।") 
@@ -809,13 +876,13 @@ async def cmd_brodcast(c, m):
         except: pass 
     await msg.edit_text(f"✅ Sent to {success} users.")
 
-@app.on_message(filters.command("cnlbdcst") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("cnlbdcst") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_cnlbdcst(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/cnlbdcst <ChatID>` (রিপ্লাই করে)\nউদাহরণ: `/cnlbdcst -100123456`")
     if not m.reply_to_message: return await m.reply("❌ Reply to a message / কোনো মেসেজে রিপ্লাই করে দিন।") 
     await m.reply_to_message.copy(m.text.split()[1]); await m.reply("✅ Message Sent to Channel/Group!")
 
-@app.on_message(filters.command("allred") & filters.user(ADMIN_ID)) 
+@app.on_message(filters.command("allred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_allred(c, m): 
     if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/allred <Limit> <Min-Max>`\nউদাহরণ: `/allred 100 10-50`")
     await get_db() 
@@ -882,9 +949,32 @@ def unlock_file():
     sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{f_id}": expiry}})
     return jsonify({"status": "success", "msg": "Unlocked!"})
 
-@web.route('/api/get_earn_ad')
-def get_earn_ad():
+@web.route('/api/earn_info/<int:uid>')
+def get_earn_info(uid):
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
+    user = sync_db["users"].find_one({"_id": uid})
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user.get("last_activity_date") != today:
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": today, "spin_count": 0, "task_count": 0}})
+        user["spin_count"] = 0
+        user["task_count"] = 0
+
+    spin_lim = config.get("spin_limit", 5)
+    task_lim = config.get("task_limit", 5)
+    
+    # Custom unlimited tasks added by Admin
+    c_tasks = list(sync_db["custom_tasks"].find())
+    for t in c_tasks: t["_id"] = str(t["_id"])
+    
+    return jsonify({
+        "spins_done": user.get("spin_count", 0), "spin_limit": spin_lim,
+        "tasks_done": user.get("task_count", 0), "task_limit": task_lim,
+        "custom_tasks": c_tasks
+    })
+
+@web.route('/api/get_earn_ad/<ad_type>')
+def get_earn_ad_dynamic(ad_type):
     links = list(sync_db["ad_links"].find())
     if not links: return jsonify({"ad_link": None})
     return jsonify({"ad_link": random.choice(links)["link"], "wait_time": 15})
@@ -895,24 +985,36 @@ def claim_earn():
     uid, task_type = data['uid'], data['type']
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
     user = sync_db["users"].find_one({"_id": uid})
-    
     today = datetime.now().strftime("%Y-%m-%d")
     
+    if user.get("last_activity_date") != today:
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": today, "spin_count": 0, "task_count": 0}})
+        user["spin_count"] = 0; user["task_count"] = 0
+
     if task_type == "spin":
-        if user.get("last_spin_date") == today:
+        limit = config.get("spin_limit", 5)
+        if user.get("spin_count", 0) >= limit:
             return jsonify({"status": "error", "msg": "❌ আজকের স্পিন লিমিট শেষ! / Daily Spin Limit Reached!"})
         
         coin = random.randint(config.get("spin_coin_min", 10), config.get("spin_coin_max", 50))
-        sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coin}, "$set": {"last_spin_date": today}})
+        sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coin, "spin_count": 1}})
         return jsonify({"status": "success", "msg": f"🎉 আপনি স্পিন করে {coin} কয়েন পেয়েছেন!"})
         
     elif task_type == "task":
-        if user.get("last_task_date") == today:
+        limit = config.get("task_limit", 5)
+        if user.get("task_count", 0) >= limit:
             return jsonify({"status": "error", "msg": "❌ আজকের টাস্ক লিমিট শেষ! / Daily Task Limit Reached!"})
             
         coin = config.get("task_coin", 20)
-        sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coin}, "$set": {"last_task_date": today}})
+        sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coin, "task_count": 1}})
         return jsonify({"status": "success", "msg": f"🎉 টাস্ক কমপ্লিট করে {coin} কয়েন পেয়েছেন!"})
+
+    elif task_type.startswith("custom_"):
+        tid = task_type.split("_")[1]
+        task_data = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
+        if task_data:
+            sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": task_data["coin"]}})
+            return jsonify({"status": "success", "msg": f"🎉 টাস্ক করে {task_data['coin']} কয়েন পেয়েছেন!"})
         
     return jsonify({"status": "error", "msg": "Invalid Task"})
 
@@ -1066,7 +1168,8 @@ HTML_TEMPLATE = """
         .cmt-item { border-bottom: 1px solid rgba(255,255,255,0.05); padding:5px 0; font-size:13px; }
         .cmt-item:last-child { border:none; }
         
-        .earn-card { background: rgba(25,25,35,0.8); border: 1px solid rgba(0,212,255,0.3); padding:20px; border-radius:15px; text-align:center; margin-bottom:15px; }
+        .earn-card { background: rgba(25,25,35,0.8); border: 1px solid rgba(0,212,255,0.3); padding:20px; border-radius:15px; text-align:center; margin-bottom:15px; position:relative; }
+        .limit-badge { position: absolute; top:10px; right:10px; background: rgba(0,0,0,0.5); padding: 3px 8px; border-radius: 10px; font-size:11px; border: 1px solid rgba(255,255,255,0.2); }
     </style>
 </head>
 <body>
@@ -1087,7 +1190,7 @@ HTML_TEMPLATE = """
             <span class="lang-bn">এই ওয়েবসাইটের কনটেন্ট শুধুমাত্র <b style="color:#00d4ff;">১৮ বছর বা তার বেশি বয়সী</b> ব্যবহারকারীদের জন্য প্রযোজ্য।</span>
             <span class="lang-en">This website content is strictly for users who are <b style="color:#00d4ff;">18 years of age or older</b>.</span>
         </p>
-        <div class="alert-box"><span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন না।</span><span class="lang-en">⚠️ Do not enter if you are under 18.</span></div>
+        <div class="alert-box"><span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন খন।</span><span class="lang-en">⚠️ Do not enter if you are under 18.</span></div>
         <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; margin-bottom:10px;" onclick="confirmAge()"><span class="lang-bn">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</span><span class="lang-en">✅ Yes, I am 18+</span></button>
         <button class="btn-main" style="background: transparent; border: 1px solid #555; color: #888;" onclick="tg.close()"><span class="lang-bn">❌ না, বের হয়ে যান</span><span class="lang-en">❌ No, Exit</span></button>
     </div>
@@ -1151,20 +1254,7 @@ HTML_TEMPLATE = """
 
 <div id="page-earn" class="page">
     <h2 style="margin-top:0;">🎯 <span class="lang-bn">কয়েন আয় করুন</span><span class="lang-en">Earn Coins</span></h2>
-    
-    <div class="earn-card">
-        <div style="font-size:40px;">🎰</div>
-        <h3>Daily Spin Bonus</h3>
-        <p style="font-size:12px; color:#aaa; margin-bottom:15px;">Watch a short ad to spin and win random coins!</p>
-        <button class="btn-main" style="background: linear-gradient(90deg, #ffb703, #ff6b6b);" onclick="startEarnAd('spin')">Spin & Earn</button>
-    </div>
-    
-    <div class="earn-card">
-        <div style="font-size:40px;">📱</div>
-        <h3>Daily Click Task</h3>
-        <p style="font-size:12px; color:#aaa; margin-bottom:15px;">Click and visit the ad completely to get fixed coins!</p>
-        <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black;" onclick="startEarnAd('task')">Complete Task</button>
-    </div>
+    <div id="earn-content">Loading...</div>
 </div>
 
 <div id="page-premium" class="page">
@@ -1315,6 +1405,7 @@ HTML_TEMPLATE = """
             document.getElementById('mem-expiry').style.display = 'none';
         }
         renderHistory();
+        loadEarnData();
     }
     loadUser();
 
@@ -1328,6 +1419,7 @@ HTML_TEMPLATE = """
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
             element.classList.add('active');
         }
+        if(pageId === 'earn') loadEarnData();
     }
     
     function togglePkg(type, element) {
@@ -1563,8 +1655,44 @@ HTML_TEMPLATE = """
         }, 1000);
     }
     
+    async function loadEarnData() {
+        let res = await fetch('/api/earn_info/' + userId);
+        let data = await res.json();
+        
+        let html = `
+        <div class="earn-card">
+            <div class="limit-badge">${data.spins_done}/${data.spin_limit} Today</div>
+            <div style="font-size:40px;">🎰</div>
+            <h3>Daily Spin Bonus</h3>
+            <p style="font-size:12px; color:#aaa; margin-bottom:15px;">Watch an ad to spin and win random coins!</p>
+            <button class="btn-main" style="background: linear-gradient(90deg, #ffb703, #ff6b6b);" onclick="startEarnAd('spin')" ${data.spins_done>=data.spin_limit?'disabled':''}>Spin & Earn</button>
+        </div>
+        
+        <div class="earn-card">
+            <div class="limit-badge">${data.tasks_done}/${data.task_limit} Today</div>
+            <div style="font-size:40px;">📱</div>
+            <h3>Daily Click Task</h3>
+            <p style="font-size:12px; color:#aaa; margin-bottom:15px;">Click and visit the ad completely to get fixed coins!</p>
+            <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black;" onclick="startEarnAd('task')" ${data.tasks_done>=data.task_limit?'disabled':''}>Complete Task</button>
+        </div>`;
+        
+        if(data.custom_tasks && data.custom_tasks.length > 0) {
+            html += `<h3 style="margin-top:25px;">⚡ Unlimited Custom Tasks</h3>`;
+            data.custom_tasks.forEach(t => {
+                html += `
+                <div class="earn-card" style="padding:15px;">
+                    <div style="font-size:25px;">💎</div>
+                    <h4 style="margin:5px 0;">${t.title}</h4>
+                    <p style="font-size:12px; color:#aaa; margin-bottom:10px;">Reward: ${t.coin} Coins</p>
+                    <button class="btn-main" style="background: linear-gradient(90deg, #c72cff, #ff007f); padding:10px;" onclick="startCustomTask('${t._id}', '${t.link}')">Complete for ${t.coin}C</button>
+                </div>`;
+            });
+        }
+        document.getElementById('earn-content').innerHTML = html;
+    }
+
     async function startEarnAd(type) {
-        let res = await fetch('/api/get_earn_ad');
+        let res = await fetch('/api/get_earn_ad/' + type);
         let data = await res.json();
         if (!data.ad_link) return tg.showAlert(currentLang==='bn'?"বর্তমানে কোনো অ্যাড নেই!":"No ads available right now!");
         
@@ -1591,6 +1719,42 @@ HTML_TEMPLATE = """
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({uid: userId, type: type})
+                    });
+                    let result = await res2.json();
+                    tg.showAlert(result.msg);
+                    if (result.status === 'success') loadUser();
+                    document.getElementById('ad-overlay').style.display = 'none';
+                };
+            } else {
+                document.getElementById('timer-count').innerText = timeLeft;
+            }
+        }, 1000);
+    }
+    
+    async function startCustomTask(taskId, link) {
+        document.getElementById('ad-overlay').style.display = 'flex';
+        document.getElementById('step-info').innerText = 'Custom Task';
+        let timeLeft = 15;
+        document.getElementById('timer-count').innerText = timeLeft;
+        document.getElementById('timer-count').style.display = 'block';
+        document.getElementById('get-file-btn').style.display = 'none';
+        
+        window.open(link, '_blank');
+        
+        clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+            timeLeft--;
+            if (timeLeft <= 0) {
+                clearInterval(timerInterval);
+                document.getElementById('timer-count').style.display = 'none';
+                let btn = document.getElementById('get-file-btn');
+                btn.innerText = "Claim Reward";
+                btn.style.display = 'block';
+                btn.onclick = async () => {
+                    let res2 = await fetch('/api/claim_earn', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({uid: userId, type: 'custom_' + taskId})
                     });
                     let result = await res2.json();
                     tg.showAlert(result.msg);
