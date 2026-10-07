@@ -1,5 +1,16 @@
-import os, sys, asyncio, threading, random, string, time, requests, json, base64
+import os, sys, asyncio, threading, random, string, time, requests, json, base64, socket
 from datetime import datetime, timedelta
+
+# ==========================================
+# 🛑 ANTI-DUPLICATE LOCK (ডাবল মেসেজ ফিক্স)
+# ==========================================
+# বট যেন ব্যাকগ্রাউন্ডে ভুল করে ২ বার রান হয়ে ডাবল মেসেজ না দেয়, তাই এই লক।
+try:
+    instance_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    instance_lock.bind(("127.0.0.1", 9876))
+except socket.error:
+    print("⚠️ বট আগে থেকেই রান হচ্ছে! ডাবল মেসেজ বন্ধ করতে নতুন প্রসেস বাতিল করা হলো।")
+    sys.exit(1)
 
 # ==========================================
 # 🛑 PYROGRAM PYTHON 3.14 FIX 🛑
@@ -140,7 +151,7 @@ async def background_tasks():
             config = await get_config() 
             av_min = config.get("autovid_time_min", 0) 
             if av_min > 0 and config.get("autovid_msg_id") and (now - last_autovid) >= (av_min * 60): 
-                last_autovid = time.time() # Moved up to prevent spam loop on error
+                last_autovid = time.time() 
                 users = await users_col.find().to_list(None) 
                 from_chat = config.get("autovid_chat_id", ADMIN_ID)
                 for u in users: 
@@ -155,10 +166,8 @@ async def background_tasks():
 
             ap_hr = config.get("autopost_time_hr", 0)
             if ap_hr > 0 and (now - last_autopost) >= (ap_hr * 3600):
-                last_autopost = time.time() # Moved up to prevent spam loop on error
+                last_autopost = time.time() 
                 idx = config.get("autopost_idx", 0)
-                
-                # Fetching files from all DBs for auto-post
                 all_files = []
                 for d in await get_extra_dbs_async():
                     all_files.extend(await d["files"].find().sort("_id", 1).to_list(None))
@@ -182,6 +191,57 @@ async def background_tasks():
 @app.on_message(filters.command("myid")) 
 async def cmd_myid(c, m): 
     await m.reply(f"✅ বট একদম ঠিকভাবে কাজ করছে! / Bot is working perfectly!\n🆔 আপনার আইডি / Your ID: {m.from_user.id}")
+
+@app.on_message(filters.command("cmd") & filters.user(ADMIN_ID))
+async def cmd_list(c, m):
+    text = """
+    🛠 **সকল কমান্ড লিস্ট / All Commands List:**
+
+🔸 **Basic Commands:**
+`/myid` - আইডি দেখতে (Check ID)
+`/stats` - ইউজারের সংখ্যা ও স্ট্যাটিস্টিকস
+`/name <Name>` - ওয়েবসাইটের নাম পরিবর্তন (Change Website Name)
+
+🔸 **File Management:**
+`/addfile` - ম্যানুয়ালি ফাইল যোগ করুন (Step-by-step)
+`/auto` - ভিডিওতে রিপ্লাই করে অটো ফাইল + 4x4 থাম্বনেইল গ্রিড তৈরি ও অটো ক্যাপশন সেট করতে।
+`/delfile <file_id>` - ফাইল ডিলিট করতে
+`/delall` - সকল ডাটাবেসের সব ফাইল ডিলিট করতে
+
+🔸 **Database (MongoDB) Manager:**
+`/mongo <uri>` - নতুন ডাটাবেস যোগ করতে
+`/delmongo` - এক্সট্রা ডাটাবেস রিমুভ করতে
+`/mongostats` - ডাটাবেস স্টোরেজ চেক করতে
+
+🔸 **Coins & Pricing:**
+`/setpremcoin <Coin>` - প্রিমিয়াম ভিডিওর দাম নির্ধারণ (ex: /setpremcoin 50)
+`/spincoin <Min-Max>` - স্পিন কয়েনের রেঞ্জ (ex: /spincoin 10-50)
+`/taskcoin <Coin>` - টাস্ক কমপ্লিট করার কয়েন (ex: /taskcoin 20)
+
+🔸 **Links & Ads:**
+`/addlink <link>` - ডাইরেক্ট অ্যাড লিংক যোগ করতে
+`/delink` - অ্যাড লিংক রিমুভ করতে
+`/prstep <step>` - প্রিমিয়াম অ্যাড স্টেপ সেট করতে (ex: /prstep 2)
+`/regstep <step>` - রেগুলার অ্যাড স্টেপ সেট করতে (ex: /regstep 1)
+
+🔸 **Channels & Broadcast:**
+`/addcnl <Name> <Link>` - ইনলাইন চ্যানেল লিংক অ্যাড করতে
+`/vercnl <ChatID> <Link>` - Must Join (Force Sub) চ্যানেল অ্যাড করতে
+`/brodcast` - সকল ইউজারকে মেসেজ পাঠাতে (কোনো মেসেজে রিপ্লাই করে)
+`/cnlbdcst <ChatID>` - নির্দিষ্ট গ্রুপ/চ্যানেলে মেসেজ পাঠাতে (রিপ্লাই করে)
+
+🔸 **Coupons & Packages:**
+`/allred <Limit> <Min-Max>` - অটো রেন্ডম কুপন তৈরি করতে
+`/addcred <Coins> = <Amt> <Unit>` - কয়েন প্যাকেজ তৈরি (ex: /addcred 500 = 7 d)
+`/bdt <Price> <Days>` - বিকাশ প্যাকেজ তৈরি
+`/usd <Price> <Days>` - USD প্যাকেজ তৈরি
+
+🔸 **Auto Delete & Others:**
+`/autodel <sec>` - ভিডিও অটো ডিলিট টাইম সেট করতে (ex: /autodel 60)
+`/frotect <on/off>` - মেসেজ ফরওয়ার্ড/সেভ অফ করতে (ex: /frotect on)
+`/addadmin <username>` - পেমেন্ট অ্যাডমিন সেট করতে
+    """
+    await m.reply(text)
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_ID)) 
 async def cmd_stats(c, m): 
@@ -253,6 +313,7 @@ async def start_cmd(client, message):
 
     if user.get("pending_file"):
         f_id = user["pending_file"]
+        # Double message fix: clear pending file FIRST
         await users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}})
         
         file_data = None
@@ -303,6 +364,9 @@ async def check_join_cb(c, q):
     for ch in await channels_col.find({"type": "must_join"}).to_list(100): 
         try: await c.get_chat_member(ch["chat_id"], q.from_user.id) 
         except: return await q.answer("❌ আপনি এখনো সব চ্যানেলে জয়েন করেননি! / You haven't joined all channels yet!", show_alert=True) 
+    
+    try: await q.answer()
+    except: pass
     await q.message.delete() 
     class FakeMsg: 
         def __init__(self, u): self.from_user = u; self.text = "/start" 
@@ -320,7 +384,7 @@ async def cmd_addfile(c, m):
 def is_in_step(step): 
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step)
 
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("name") & ~filters.command(["start", "myid"])) 
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("name") & ~filters.command(["start", "myid", "cmd"])) 
 async def handle_admin_name(c, m): 
     admin_steps[m.from_user.id]["title"] = m.text 
     admin_steps[m.from_user.id]["step"] = "thumb" 
@@ -362,7 +426,6 @@ async def handle_admin_file(c, m):
     target_db = dbs[0]
     min_size = float('inf')
     
-    # Auto-Distribution: Find DB with the most free storage
     for d in dbs:
         try:
             st = await d.command("dbstats")
@@ -377,26 +440,61 @@ async def handle_admin_file(c, m):
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
 
-# --- NEW AUTO UPLOAD SYSTEM ---
+# --- UPDATED AUTO UPLOAD SYSTEM WITH 4x2 GRID & AUTO CAPTION ---
 @app.on_message(filters.command("auto") & filters.user(ADMIN_ID))
 async def cmd_auto_upload(c, m):
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document):
-        return await m.reply("❌ কোনো ভিডিও বা ডকুমেন্টে রিপ্লাই করে `/auto <Title>` দিন।\n(Reply to a video with /auto Title)")
+        return await m.reply("❌ কোনো ভিডিও বা ডকুমেন্টে রিপ্লাই করে `/auto` দিন।\n(Reply to a video with /auto)")
     
-    title = m.text.replace("/auto", "").strip() or "Auto Uploaded Video"
-    msg = await m.reply("⏳ অটো প্রসেস করা হচ্ছে... / Processing auto upload...")
+    title = m.text.replace("/auto", "").strip()
+    
+    # Auto Title Generate Logic (If title is empty)
+    if not title:
+        total_files = 0
+        dbs = await get_extra_dbs_async()
+        for d in dbs: 
+            total_files += await d["files"].count_documents({})
+            
+        serial_num = f"{total_files + 1:03d}"
+        
+        # Random captions mapped to your request
+        random_titles = [
+            f"নিউ ভাইরাল সেক্স ভিডিও {serial_num} / New Viral Sex Video {serial_num}",
+            f"মাল আউট করার সেক্স ভিডিও {serial_num} / Sperm Release Sex Video {serial_num}",
+            f"শব্দ শুনলেই হাত মারতে চাইবে {serial_num} / You will masturbate hearing the sound {serial_num}",
+            f"অসাধারণ সেক্স ভিডিও {serial_num} / Awesome Sex Video {serial_num}",
+            f"গোপন ক্যামেরায় ধারণ করা ভিডিও {serial_num} / Hidden Camera Video {serial_num}"
+        ]
+        title = random.choice(random_titles)
+
+    msg = await m.reply(f"⏳ অটো প্রসেস ও স্ক্রিনশট গ্রিড তৈরি করা হচ্ছে (এতে কিছুক্ষণ সময় লাগতে পারে)...\n\n**অটো টাইটেল:** {title}")
+    
     thumb_url = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
-    
     media = m.reply_to_message.video or m.reply_to_message.document
-    if getattr(media, "thumbs", None):
-        try:
-            path = await c.download_media(media.thumbs[0].file_id)
-            with open(path, "rb") as image_file:
+    
+    try:
+        # Download video to process via ffmpeg
+        video_path = await c.download_media(media.file_id)
+        grid_path = f"{video_path}_grid.jpg"
+        
+        # FFmpeg command to extract 8 frames and make a 4x2 grid (4 columns, 2 rows)
+        cmd_safe = f'ffmpeg -y -i "{video_path}" -vf "thumbnail=n=50,scale=320:-1,tile=4x2" -frames:v 1 -q:v 2 "{grid_path}"'
+        
+        process = await asyncio.create_subprocess_shell(cmd_safe, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await process.communicate()
+        
+        # Read the generated grid and encode
+        if os.path.exists(grid_path):
+            with open(grid_path, "rb") as image_file:
                 encoded = base64.b64encode(image_file.read()).decode('utf-8')
             thumb_url = f"data:image/jpeg;base64,{encoded}"
-            os.remove(path)
-        except Exception as e:
-            print("Auto Thumb Error:", e)
+            os.remove(grid_path)
+            
+        # Delete downloaded video to save space
+        if os.path.exists(video_path):
+            os.remove(video_path)
+    except Exception as e:
+        print("Auto Grid Error:", e)
 
     admin_steps[m.from_user.id] = {
         "step": "auto_wait",
@@ -518,7 +616,7 @@ async def cmd_mongostats(c, m):
     await msg.edit_text(text)
 
 # ==========================================
-# 6. OTHER ADMIN COMMANDS (WITH NEW CONFIGS)
+# 6. OTHER ADMIN COMMANDS
 # ==========================================
 @app.on_message(filters.command("setpremcoin") & filters.user(ADMIN_ID)) 
 async def cmd_setpremcoin(c, m): 
@@ -743,7 +841,7 @@ def get_ad_api(user_id, file_id):
     if user and user.get("premium_until") and user["premium_until"] > datetime.now(): 
         return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
 
-    # Check if previously unlocked (Ad or Coin) and time is not expired
+    # Check if previously unlocked
     unlocked_files = user.get("unlocked_files", {})
     if file_id in unlocked_files:
         try:
@@ -789,7 +887,7 @@ def get_earn_ad():
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
     links = list(sync_db["ad_links"].find())
     if not links: return jsonify({"ad_link": None})
-    return jsonify({"ad_link": random.choice(links)["link"], "wait_time": 15}) # 15s wait for earn ads
+    return jsonify({"ad_link": random.choice(links)["link"], "wait_time": 15})
 
 @web.route('/api/claim_earn', methods=['POST'])
 def claim_earn():
@@ -1549,7 +1647,6 @@ def home():
     config = sync_db["config"].find_one({"_id": "settings"}) or {}
     return render_template_string(HTML_TEMPLATE, files_json=json.dumps(files), pkgs=list(sync_db["packages"].find()), bot_username=BOT_USERNAME, config=config, site_name=config.get("site_name", "Glow Top"), ref_coin=config.get("ref_coin", 10))
 
-# 🔥 Vercel Deployment এর জন্য web ভেরিয়েবল প্রয়োজন তাই alias করা হলো
 app_flask = web 
 
 def run_flask(): 
