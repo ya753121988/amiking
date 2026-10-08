@@ -246,6 +246,8 @@ async def cmd_list(c, m):
 `/setpremcoin <Coin>` - প্রিমিয়াম ভিডিওর দাম নির্ধারণ (ex: /setpremcoin 50)
 `/spincoin <Min-Max>` - স্পিন কয়েনের রেঞ্জ (ex: /spincoin 10-50)
 `/taskcoin <Coin>` - টাস্ক কমপ্লিট করার কয়েন (ex: /taskcoin 20)
+`/relocktime <Min>` - ভিডিও কতক্ষণ পর আবার লক হবে (ex: /relocktime 1440)
+`/delrelocktime` - ভিডিও আনলক টাইমার ডিলিট করতে (কখনো লক হবে না)
 
 🔸 **Links & Ads:**
 `/addlink <link>` - ডাইরেক্ট অ্যাড লিংক যোগ করতে
@@ -662,6 +664,10 @@ async def cmd_relocktime(c, m):
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/relocktime <Minutes>`\nউদাহরণ: `/relocktime 1440` (1440 min = 24 hrs)")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": int(m.text.split()[1])}}); await m.reply("✅ Video Relock Time Set!")
 
+@app.on_message(filters.command("delrelocktime") & filters.user(ADMIN_ID) & unique_msg) 
+async def cmd_delrelocktime(c, m): 
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); await m.reply("✅ Video Relock Time Deleted! (ভিডিও আর কখনো লক হবে না, আজীবন আনলক থাকবে)")
+
 @app.on_message(filters.command("spincoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_spincoin(c, m): 
     if len(m.text.split()) < 2 or "-" not in m.text: return await m.reply("❌ সঠিক নিয়ম: `/spincoin <Min-Max>`\nউদাহরণ: `/spincoin 10-50`")
@@ -945,7 +951,11 @@ def unlock_file():
         sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": -cost}})
         
     relock_min = config.get("vid_relock_min", 1440)
-    expiry = (datetime.now() + timedelta(minutes=relock_min)).isoformat()
+    if relock_min > 0:
+        expiry = (datetime.now() + timedelta(minutes=relock_min)).isoformat()
+    else:
+        expiry = (datetime.now() + timedelta(days=36500)).isoformat() # 100 Years Forever
+
     sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{f_id}": expiry}})
     return jsonify({"status": "success", "msg": "Unlocked!"})
 
@@ -963,7 +973,6 @@ def get_earn_info(uid):
     spin_lim = config.get("spin_limit", 5)
     task_lim = config.get("task_limit", 5)
     
-    # Custom unlimited tasks added by Admin
     c_tasks = list(sync_db["custom_tasks"].find())
     for t in c_tasks: t["_id"] = str(t["_id"])
     
@@ -1092,7 +1101,13 @@ def get_user(user_id):
             if sec or not res: res.append(f"{sec} সেকেন্ড/s")
             expiry_str = " ".join(res)
 
-    return jsonify({"balance": user.get("balance", 0) if user else 0, "is_premium": is_prem, "expiry": expiry_str, "history": user.get("history", []) if user else []})
+    return jsonify({
+        "balance": user.get("balance", 0) if user else 0, 
+        "is_premium": is_prem, 
+        "expiry": expiry_str, 
+        "history": user.get("history", []) if user else [],
+        "unlocked_files": user.get("unlocked_files", {}) if user else {}
+    })
 
 # ==========================================
 # 8. HTML UI & LOGIC 
@@ -1196,9 +1211,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- ==================================
-    ✨ PREMIUM AD POP-UP (NEW DESIGN)
-=================================== -->
 <div id="ad-overlay" class="modal-overlay">
     <div class="modal-box" style="background: rgba(20,20,30,0.95); border: 2px solid #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.4); border-radius: 20px;">
         <h2 style="color: #00d4ff; margin-top: 0;">🚀 Ad Verification</h2>
@@ -1308,7 +1320,7 @@ HTML_TEMPLATE = """
             <div style="position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #c72cff; color: white; font-size: 11px; font-weight: bold; padding: 4px 15px; border-radius: 12px;">🪙 Buy with Coin</div>
             <div style="font-size:35px; margin-bottom:10px;">💎</div>
             <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
-            <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} Premium (No Ads)</p>
+            <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} VIP (No Ads)</p>
             <button class="btn-main" style="margin:0; padding:12px; background:#c72cff;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})"><span class="lang-bn">কয়েন দিয়ে নিন</span><span class="lang-en">Exchange Coin</span></button>
         </div>
         {% endfor %}
@@ -1328,7 +1340,7 @@ HTML_TEMPLATE = """
         <div class="set-icon" style="background: linear-gradient(135deg, #a18cd1, #fbc2eb);">🎟</div>
         <div>
             <b style="display:block; font-size:16px;"><span class="lang-bn">কুপন কোড (রিডিম)</span><span class="lang-en">Redeem Coupon</span></b>
-            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড দিয়ে ফ্রি কয়েন বা Premium নিন</span><span class="lang-en">Redeem to get free coins/Premium</span></span>
+            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড দিয়ে ফ্রি কয়েন বা VIP নিন</span><span class="lang-en">Redeem to get free coins/VIP</span></span>
         </div>
     </div>
     <div class="set-item" onclick="switchNav('share')">
@@ -1343,8 +1355,8 @@ HTML_TEMPLATE = """
 <div id="page-coupon" class="page">
     <h2 style="margin-top:0;">🎟 <span class="lang-bn">কুপন কোড</span><span class="lang-en">Coupon Code</span></h2>
     <p style="font-size:13px; color:#aaa; margin-bottom:20px;">
-        <span class="lang-bn">অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি <b>ফ্রি কয়েন</b> অথবা <b>Premium</b> পাবেন!</span>
-        <span class="lang-en">Enter secret code to instantly receive <b>Free Coins</b> or <b>Premium</b>!</span>
+        <span class="lang-bn">অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি <b>ফ্রি কয়েন</b> অথবা <b>VIP</b> পাবেন!</span>
+        <span class="lang-en">Enter secret code to instantly receive <b>Free Coins</b> or <b>VIP</b>!</span>
     </p>
     <div style="display:flex; gap:10px; margin-bottom:20px;">
         <input type="text" id="coupon-input" class="search-box" style="margin:0; border-radius:12px;" placeholder="Enter coupon">
@@ -1364,9 +1376,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- ==================================
-    ✨ NEW NAVIGATION ORDER
-=================================== -->
 <div class="bottom-nav">
     <div class="nav-item active" onclick="switchNav('home', this)"><span>🏠</span> Home</div>
     <div class="nav-item" onclick="switchNav('regvids', this)"><span>👤</span> Regular</div>
@@ -1381,25 +1390,29 @@ HTML_TEMPLATE = """
     tg.expand();
     let botUsername = "{{ bot_username }}";
     let adminUsername = "{{ config.payment_admin }}";
-    let userId = tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 123456789; 
+    
+    // 🚀 BROWSER SESSION CRASH FIX (Fail-safe for external browsers)
+    let userId = 123456789;
+    if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+        userId = tg.initDataUnsafe.user.id;
+        localStorage.setItem("tg_user_id", userId);
+    } else if (localStorage.getItem("tg_user_id")) {
+        userId = parseInt(localStorage.getItem("tg_user_id"));
+    }
     
     document.getElementById('set-id').innerText = userId;
     document.getElementById('ref-link').value = `https://t.me/${botUsername}?start=${userId}`;
     
     let userBalance = 0;
     let userHistory = []; 
+    let userUnlockedFiles = {};
     
-    // 🚀 SMART BROWSER REDIRECT: যেকোনো ব্রাউজার থেকে ফাস্ট কাজ করার জন্য
     function openTgLink(url) {
         try {
             if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
                 tg.openTelegramLink(url);
-            } else {
-                window.location.href = url;
-            }
-        } catch(e) {
-            window.location.href = url;
-        }
+            } else { window.location.href = url; }
+        } catch(e) { window.location.href = url; }
     }
 
     let currentLang = localStorage.getItem('appLang') || 'bn';
@@ -1418,6 +1431,8 @@ HTML_TEMPLATE = """
         let data = await res.json();
         userBalance = data.balance;
         userHistory = data.history || []; 
+        userUnlockedFiles = data.unlocked_files || {};
+        
         document.getElementById('hdr-balance').innerText = userBalance;
         document.getElementById('set-balance').innerText = userBalance;
         
@@ -1435,8 +1450,49 @@ HTML_TEMPLATE = """
         }
         renderHistory();
         loadEarnData();
+        updateCountdowns();
     }
     loadUser();
+
+    // 🚀 LIVE COUNTDOWN TIMER LOGIC
+    function updateCountdowns() {
+        let now = new Date();
+        Object.keys(userUnlockedFiles).forEach(fId => {
+            let el = document.getElementById(`countdown-${fId}`);
+            if (!el) return;
+            let expiry = new Date(userUnlockedFiles[fId]);
+            let diff = expiry - now;
+            
+            if (diff > 0) {
+                if (diff > 315360000000) { // 10 years logic
+                    el.innerHTML = currentLang === 'bn' ? "🔓 আজীবন আনলক" : "🔓 Unlocked Forever";
+                    el.style.display = "block";
+                } else {
+                    let d = Math.floor(diff / 86400000);
+                    let h = Math.floor((diff / 3600000) % 24);
+                    let m = Math.floor((diff / 60000) % 60);
+                    let s = Math.floor((diff / 1000) % 60);
+                    
+                    let y = Math.floor(d / 365); d = d % 365;
+                    let mo = Math.floor(d / 30); d = d % 30;
+
+                    let t = "🔓 ";
+                    if(y>0) t += y + (currentLang==='bn'?"ব ":"y ");
+                    if(mo>0) t += mo + (currentLang==='bn'?"মা ":"mo ");
+                    if(d>0) t += d + (currentLang==='bn'?"দি ":"d ");
+                    if(h>0) t += h + (currentLang==='bn'?"ঘ ":"h ");
+                    if(m>0) t += m + (currentLang==='bn'?"মি ":"m ");
+                    t += s + (currentLang==='bn'?"সে":"s");
+                    
+                    el.innerHTML = t;
+                    el.style.display = "block";
+                }
+            } else {
+                el.style.display = "none";
+            }
+        });
+    }
+    setInterval(updateCountdowns, 1000);
 
     document.getElementById('age-modal').style.display = 'flex';
     function confirmAge() { document.getElementById('age-modal').style.display = 'none'; }
@@ -1492,7 +1548,6 @@ HTML_TEMPLATE = """
 
     function createCard(f) {
         let tag = f.is_premium ? '<div class="tag-premium">💎 Premium</div>' : '<div class="tag-regular">👤 Regular</div>';
-        
         let likesArr = Array.isArray(f.likes) ? f.likes : [];
         let likeCount = likesArr.length;
         let isLiked = likesArr.includes(userId);
@@ -1501,6 +1556,7 @@ HTML_TEMPLATE = """
         return `<div class="video-card">
             <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
             ${tag}
+            <div id="countdown-${f._id}" class="countdown-badge" style="display:none; position:absolute; bottom:60px; right:10px; background:rgba(0,0,0,0.85); border:1px solid #00d4ff; color:#00ffcc; padding:6px 10px; border-radius:8px; font-size:11px; font-weight:bold; z-index:10; box-shadow: 0 0 10px rgba(0,212,255,0.3);"></div>
             <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
             <div class="video-info">
                 <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title} <small style="color:#00d4ff;">[ID: ${f._id}]</small></b>
@@ -1527,6 +1583,7 @@ HTML_TEMPLATE = """
         pageFiles.forEach(f => { html += createCard(f); });
         document.getElementById(`${tab}-video-list`).innerHTML = html;
         renderPagination(tab, filtered.length);
+        updateCountdowns();
     }
 
     function renderHistory() {
@@ -1534,6 +1591,7 @@ HTML_TEMPLATE = """
         let html = histFiles.length === 0 ? "<p style='text-align:center; color:#666;'>No history yet!</p>" : "";
         histFiles.reverse().forEach(f => { html += createCard(f); });
         document.getElementById('history-video-list').innerHTML = html;
+        updateCountdowns();
     }
 
     function handleSearch(tab) { let id = tab==='home'? 'search-bar' : 'search-bar-'+tab; state[tab].q = document.getElementById(id).value.toLowerCase(); state[tab].p = 1; renderList(tab); }
@@ -1616,7 +1674,7 @@ HTML_TEMPLATE = """
         } else if (adDataGlobal.show_ad) { 
             startAdProcess(); 
         } else { 
-            openTgLink(currentDeepLink); setTimeout(() => {if(tg.close) tg.close();}, 500); 
+            openTgLink(currentDeepLink); setTimeout(() => {if(tg && tg.close) tg.close();}, 500); 
         }
     }
     
@@ -1632,17 +1690,16 @@ HTML_TEMPLATE = """
         if (data.status === 'success') {
             loadUser();
             openTgLink(currentDeepLink);
-            setTimeout(() => {if(tg.close) tg.close();}, 500);
+            setTimeout(() => {if(tg && tg.close) tg.close();}, 500);
         } else {
-            // 🚀 AUTO REDIRECT TO PREMIUM PAGE IF NO COINS
-            tg.showAlert(data.msg);
+            alert(data.msg);
             if(data.msg.includes("পর্যাপ্ত কয়েন নেই") || data.msg.includes("Insufficient")) {
                 switchNav('premium', document.getElementById('nav-premium'));
             }
         }
     }
 
-    // 🚀 RESUME PROGRESS AD SYSTEM FIX (SAVE TIME IN LOCAL STORAGE)
+    // 🚀 RESUME PROGRESS AD SYSTEM
     function startAdProcess() {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('get-file-btn').style.display = 'none';
@@ -1684,7 +1741,9 @@ HTML_TEMPLATE = """
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({uid: userId, file_id: cFileId, method: "ad"})
                         });
-                        openTgLink(currentDeepLink); setTimeout(()=>{if(tg.close) tg.close();}, 500);
+                        loadUser();
+                        openTgLink(currentDeepLink); 
+                        setTimeout(()=>{ if(tg && tg.close) tg.close(); }, 500);
                     };
                 }
             } else {
@@ -1733,7 +1792,7 @@ HTML_TEMPLATE = """
     async function startEarnAd(type) {
         let res = await fetch('/api/get_earn_ad/' + type);
         let data = await res.json();
-        if (!data.ad_link) return tg.showAlert(currentLang==='bn'?"বর্তমানে কোনো অ্যাড নেই!":"No ads available right now!");
+        if (!data.ad_link) return alert(currentLang==='bn'?"বর্তমানে কোনো অ্যাড নেই!":"No ads available right now!");
         
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = type === 'spin' ? 'Bonus Spin Ad' : 'Bonus Task Ad';
@@ -1760,7 +1819,7 @@ HTML_TEMPLATE = """
                         body: JSON.stringify({uid: userId, type: type})
                     });
                     let result = await res2.json();
-                    tg.showAlert(result.msg);
+                    alert(result.msg);
                     if (result.status === 'success') loadUser();
                     document.getElementById('ad-overlay').style.display = 'none';
                 };
@@ -1796,7 +1855,7 @@ HTML_TEMPLATE = """
                         body: JSON.stringify({uid: userId, type: 'custom_' + taskId})
                     });
                     let result = await res2.json();
-                    tg.showAlert(result.msg);
+                    alert(result.msg);
                     if (result.status === 'success') loadUser();
                     document.getElementById('ad-overlay').style.display = 'none';
                 };
@@ -1808,31 +1867,31 @@ HTML_TEMPLATE = """
 
     async function redeemCoupon() {
         let code = document.getElementById('coupon-input').value;
-        if(!code) return tg.showAlert(currentLang==='bn'?"কোড লিখুন!":"Enter Code!");
+        if(!code) return alert(currentLang==='bn'?"কোড লিখুন!":"Enter Code!");
         let res = await fetch('/api/redeem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, code: code }) });
         let data = await res.json();
-        tg.showAlert(data.msg);
+        alert(data.msg);
         if(data.status === 'success') { loadUser(); document.getElementById('coupon-input').value = ""; }
     }
     
     async function buyWithCoin(pkgId, cost) {
-        if(userBalance < cost) return tg.showAlert(currentLang==='bn'?"❌ আপনার পর্যাপ্ত কয়েন নেই!":"❌ Insufficient Coins!");
+        if(userBalance < cost) return alert(currentLang==='bn'?"❌ আপনার পর্যাপ্ত কয়েন নেই!":"❌ Insufficient Coins!");
         let confirmText = currentLang === 'bn' ? `আপনি কি ${cost} কয়েন দিয়ে প্রিমিয়াম নিতে চান?` : `Buy Premium with ${cost} coins?`;
         if(confirm(confirmText)) {
             let res = await fetch('/api/buy_with_coin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, pkg_id: pkgId }) });
             let data = await res.json();
-            tg.showAlert(data.msg); loadUser();
+            alert(data.msg); loadUser();
         }
     }
 
     function copyRef() { 
         let c = document.getElementById("ref-link"); c.select(); navigator.clipboard.writeText(c.value); 
-        tg.showAlert(currentLang==='bn'?"✅ রেফার লিংক কপি হয়েছে!":"✅ Link Copied!"); 
+        alert(currentLang==='bn'?"✅ রেফার লিংক কপি হয়েছে!":"✅ Link Copied!"); 
     }
     
     function reqBuy() { 
         openTgLink(`https://t.me/${adminUsername}`); 
-        tg.showAlert(currentLang==='bn'?"✅ পেমেন্ট করতে অ্যাডমিনকে ইনবক্সে মেসেজ দিন।":"✅ Inbox Admin to pay."); 
+        alert(currentLang==='bn'?"✅ পেমেন্ট করতে অ্যাডমিনকে ইনবক্সে মেসেজ দিন।":"✅ Inbox Admin to pay."); 
     }
 </script>
 </body>
