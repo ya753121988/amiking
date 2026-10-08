@@ -439,7 +439,14 @@ async def start_cmd(client, message):
     if config.get("start_text"): txt += f"\n📝 {config.get('start_text')}\n"
     txt += "\n👇 নিচের বাটন থেকে অ্যাপ ওপেন করুন / Click below to open app:"
 
-    btns = [[InlineKeyboardButton(ch["name"], url=ch["link"])] for ch in await channels_col.find({"type": "inline"}).to_list(100)]
+    # 🛑 নিরাপদ বাটন জেনারেশন (ভুল এড়াতে ট্রাই-ক্যাচ ও ভ্যালিডেশন সহ)
+    btns = []
+    try:
+        async for ch in channels_col.find({"type": "inline"}):
+            if ch.get("name") and ch.get("link"):
+                btns.append([InlineKeyboardButton(ch["name"], url=ch["link"])])
+    except Exception as e:
+        print("Channel Buttons Error:", e)
     
     btns.insert(0, [InlineKeyboardButton(f"🔥 Open / ওপেন {config.get('site_name', 'Glow Top')}", web_app=WebAppInfo(url=f"{WEB_URL}/?uid={uid}"))])
 
