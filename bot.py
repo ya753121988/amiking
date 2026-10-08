@@ -899,8 +899,9 @@ async def cmd_addcred(c, m):
 @app.on_message(filters.command("delcred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delcred(c, m): 
     await get_db() 
-    btns = [[InlineKeyboardButton(f"❌ {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in await pkgs_col.find({"type": "coin"}).to_list(100)] 
-    await m.reply("ডিলিট করতে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
+    # {"type": "coin"} সরিয়ে দেওয়া হয়েছে যাতে সব প্যাকেজ শো করে
+    btns = [[InlineKeyboardButton(f"❌ {p.get('type', '').upper()} | {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in await pkgs_col.find().to_list(100)] 
+    await m.reply("প্যাকেজ ডিলিট করতে নিচে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
 @app.on_callback_query(filters.regex(r"^delpkg_") & filters.user(ADMIN_ID) & unique_cb)
 async def delpkg_cb(c, q): 
