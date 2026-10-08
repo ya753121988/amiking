@@ -1,4 +1,4 @@
-import os, sys, asyncio, threading, random, string, time, requests, json, base64, socket
+import os, sys, asyncio, threading, random, string, time, requests, json, base64, socket, io
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -161,12 +161,25 @@ def get_extra_dbs_sync():
     return dbs
 
 # ==========================================
-# 3. BACKGROUND TASKS
+# 3. BACKGROUND TASKS (Fixed Base64 Bug)
 # ==========================================
 async def background_tasks(): 
     last_autovid = time.time()
     last_autopost = time.time() 
     last_channel_post = time.time() 
+    
+    # 🛑 Base64 কনভার্টার (টেলিগ্রামে ছবি পাঠানোর জন্য)
+    def get_tg_photo(thumb):
+        if not thumb: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+        if thumb.startswith("data:image"):
+            try:
+                b64 = thumb.split(",")[1]
+                img = io.BytesIO(base64.b64decode(b64))
+                img.name = "thumb.jpg"
+                return img
+            except: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+        return thumb
+
     while True: 
         await asyncio.sleep(60) 
         now = time.time() 
@@ -202,7 +215,7 @@ async def background_tasks():
                     btn = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now / দেখুন", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
                     for u in users:
                         try:
-                            await app.send_photo(u["_id"], photo=f.get("thumb_url"), caption=f"🔥 **New Video / নতুন ভিডিও!**\n\nTitle: {f['title']}\n\n👇 Click below to watch / নিচে ক্লিক করে দেখুন!", reply_markup=btn)
+                            await app.send_photo(u["_id"], photo=get_tg_photo(f.get("thumb_url")), caption=f"🔥 **New Video / নতুন ভিডিও!**\n\nTitle: {f['title']}\n\n👇 Click below to watch / নিচে ক্লিক করে দেখুন!", reply_markup=btn)
                             await asyncio.sleep(0.05)
                         except: pass
                     await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_idx": idx + 1}})
@@ -226,7 +239,7 @@ async def background_tasks():
                     try:
                         await app.send_photo(
                             ch_id,
-                            photo=f.get("thumb_url", "https://placehold.co/600x400/1c1c24/ff007f?text=Media"),
+                            photo=get_tg_photo(f.get("thumb_url")),
                             caption=f"🔥 **New Trending Video!**\n\n🎬 **{f['title']}**\n\n👇 নিচের লিংকে বা বাটনে ক্লিক করে সম্পূর্ণ ভিডিও দেখুন!",
                             reply_markup=btn
                         )
@@ -296,6 +309,7 @@ async def cmd_list(c, m):
 `/addcred <Coins> = <Amt> <Unit>` - কয়েন প্যাকেজ তৈরি (ex: /addcred 500 = 7 d)
 `/bdt <Price> <Days>` - বিকাশ প্যাকেজ তৈরি
 `/usd <Price> <Days>` - USD প্যাকেজ তৈরি
+`/delcred` - যেকোনো তৈরি করা প্যাকেজ ডিলিট করতে 
 
 🔸 **Auto Delete & Others:**
 `/autodel <sec>` - ভিডিও অটো ডিলিট টাইম সেট করতে (ex: /autodel 60)
@@ -580,7 +594,7 @@ async def cmd_auto_upload(c, m):
     
     btns = [[InlineKeyboardButton("💎 Premium Video", callback_data="auto_prem")], 
             [InlineKeyboardButton("👤 Regular Video", callback_data="auto_reg")]]
-    await msg.edit_text(f"✅ **নাম:** {title}\n\nভিডিওটি কি প্রিমিয়াম নাকি রেগুলার কোথায় অ্যাড হবে? / Where to add this video?", reply_markup=InlineKeyboardMarkup(btns))
+    await msg.edit_text(f"✅ **নাম:** {title}\n\nভিডিওটি কি প্রিমিয়াম নাকি রেগুলার কোথায় অ্যাড হবে? / Where to add this video?", reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^auto_") & filters.user(ADMIN_ID) & unique_cb)
 async def auto_type_cb(c, q):
@@ -899,7 +913,7 @@ async def cmd_addcred(c, m):
 @app.on_message(filters.command("delcred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delcred(c, m): 
     await get_db() 
-    # {"type": "coin"} সরিয়ে দেওয়া হয়েছে যাতে সব প্যাকেজ শো করে
+    # [FIX]: {"type": "coin"} রিমুভ করা হয়েছে যাতে সব প্যাকেজ (BDT, USD, Coin) একসাথে শো করে।
     btns = [[InlineKeyboardButton(f"❌ {p.get('type', '').upper()} | {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in await pkgs_col.find().to_list(100)] 
     await m.reply("প্যাকেজ ডিলিট করতে নিচে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
@@ -970,7 +984,6 @@ def get_ad_api(user_id, file_id):
     unlocked_files = user.get("unlocked_files", {})
     if file_id in unlocked_files:
         try:
-            # 🛑 [FIX] Removed Z forcefully before parsing to avoid Python <= 3.10 crashes which asked for ads repeatedly
             date_str = unlocked_files[file_id].replace("Z", "")
             expiry_date = datetime.fromisoformat(date_str)
             if expiry_date > datetime.utcnow():
