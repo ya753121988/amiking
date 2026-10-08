@@ -18,7 +18,7 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 from pyrogram import Client, filters, idle, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo 
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp 
 from pyrogram.errors import UserNotParticipant, FloodWait 
 from flask import Flask, render_template_string, jsonify, request 
 from motor.motor_asyncio import AsyncIOMotorClient 
@@ -2221,6 +2221,21 @@ async def main_bot():
     await get_config() 
     await app.start() 
     print("✅ Bot Started Successfully!") 
+    
+    # ==========================================
+    # 🛑 MINI APP AUTO SETUP (মেনু বাটন অটো সেট)
+    # ==========================================
+    try:
+        await app.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="🔥 Open App",
+                web_app=WebAppInfo(url=WEB_URL)
+            )
+        )
+        print("✅ Mini App Menu Button Auto Setup Successful!")
+    except Exception as e:
+        print(f"⚠️ Mini App Auto Setup Error: {e}")
+
     asyncio.create_task(background_tasks()) 
     await idle() 
     await app.stop()
