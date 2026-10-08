@@ -1175,7 +1175,7 @@ HTML_TEMPLATE = """
 <body>
 
 <div class="header">
-    <div class="logo">{{ site_name }}<span class="prem-badge" id="prem-badge">VIP</span></div>
+    <div class="logo">{{ site_name }}<span class="prem-badge" id="prem-badge">Premium</span></div>
     <div style="display:flex; align-items:center;">
         <button class="lang-btn" onclick="toggleLanguage()" id="lang-btn">English</button>
         <div class="coin-pill">🏛 <span id="hdr-balance">0</span></div>
@@ -1192,16 +1192,29 @@ HTML_TEMPLATE = """
         </p>
         <div class="alert-box"><span class="lang-bn">⚠️ আপনার বয়স ১৮+ না হলে সাইটটি ব্যবহার করবেন খন।</span><span class="lang-en">⚠️ Do not enter if you are under 18.</span></div>
         <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; margin-bottom:10px;" onclick="confirmAge()"><span class="lang-bn">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</span><span class="lang-en">✅ Yes, I am 18+</span></button>
-        <button class="btn-main" style="background: transparent; border: 1px solid #555; color: #888;" onclick="tg.close()"><span class="lang-bn">❌ না, বের হয়ে যান</span><span class="lang-en">❌ No, Exit</span></button>
+        <button class="btn-main" style="background: transparent; border: 1px solid #555; color: #888;" onclick="window.close()"><span class="lang-bn">❌ না, বের হয়ে যান</span><span class="lang-en">❌ No, Exit</span></button>
     </div>
 </div>
 
+<!-- ==================================
+    ✨ PREMIUM AD POP-UP (NEW DESIGN)
+=================================== -->
 <div id="ad-overlay" class="modal-overlay">
-    <div class="modal-box" style="background:transparent; border:none; box-shadow:none;">
-        <div style="background: rgba(255,255,255,0.1); padding: 5px 15px; border-radius: 20px; display:inline-block; margin-bottom: 15px; font-weight:bold;" id="step-info">Step 1 of 1</div>
-        <h1 id="timer-count" style="font-size:90px; color:#f02d73; margin:0;">5</h1>
-        <p style="font-size:16px; color:#aaa;"><span class="lang-bn">অ্যাড দেখার পর ফাইলটি পাবেন (ব্যাক দিলে টাইম রিফ্রেশ হবে)</span><span class="lang-en">You will get the file after ad</span></p>
-        <button id="get-file-btn" class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; display:none;">Next Step</button>
+    <div class="modal-box" style="background: rgba(20,20,30,0.95); border: 2px solid #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.4); border-radius: 20px;">
+        <h2 style="color: #00d4ff; margin-top: 0;">🚀 Ad Verification</h2>
+        <div style="background: rgba(0,0,0,0.4); padding: 10px; border-radius: 12px; margin-bottom: 15px; font-weight:bold; color: #fff; font-size: 15px; border: 1px solid rgba(255,255,255,0.1);" id="step-info">
+            Step 1 of 1
+        </div>
+        <div style="position: relative; width: 120px; height: 120px; margin: 0 auto 15px auto; border-radius: 50%; border: 4px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center; background: radial-gradient(circle, rgba(255,0,127,0.2) 0%, transparent 70%);">
+            <h1 id="timer-count" style="font-size:50px; color:#f02d73; margin:0;">5</h1>
+            <span style="position: absolute; bottom: 15px; font-size: 11px; color: #aaa;">Seconds</span>
+        </div>
+        <p style="font-size:14px; color:#aaa; margin-bottom: 20px;">
+            <span class="lang-bn">ফাইলটি পেতে সম্পূর্ণ অ্যাডটি দেখুন। ব্যাক দিলে বা কেটে দিলে পুনরায় এখান থেকেই শুরু হবে।</span>
+            <span class="lang-en">Watch the ad completely. Progress is saved if you go back.</span>
+        </p>
+        <button id="get-file-btn" class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; display:none; font-weight: bold; font-size: 18px; padding: 12px;">Next Step</button>
+        <button onclick="document.getElementById('ad-overlay').style.display='none'" style="background: transparent; border: none; color: #777; margin-top: 10px; cursor: pointer; text-decoration: underline;">Hide & Cancel</button>
     </div>
 </div>
 
@@ -1258,7 +1271,7 @@ HTML_TEMPLATE = """
 </div>
 
 <div id="page-premium" class="page">
-    <h2 style="margin-top:0;">VIP / Buy Coins</h2>
+    <h2 style="margin-top:0;">Premium / Buy Coins</h2>
     <div style="display:flex; gap:10px; margin-bottom:20px;">
         <div class="cat-btn active" style="flex:1; text-align:center; border-radius:12px;" onclick="togglePkg('bks', this)">📱 BDT</div>
         <div class="cat-btn" style="flex:1; text-align:center; border-radius:12px;" onclick="togglePkg('usd', this)">⚡ USD</div>
@@ -1295,7 +1308,7 @@ HTML_TEMPLATE = """
             <div style="position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #c72cff; color: white; font-size: 11px; font-weight: bold; padding: 4px 15px; border-radius: 12px;">🪙 Buy with Coin</div>
             <div style="font-size:35px; margin-bottom:10px;">💎</div>
             <h2 style="margin:0 0 5px 0; font-size:24px;">{{ pkg.details.split('=')[0] if '=' in pkg.details else pkg.details }}</h2>
-            <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} VIP (No Ads)</p>
+            <p style="color:#aaa; font-size:14px; margin:0 0 15px 0;">{{ pkg.details.split('=')[1] if '=' in pkg.details else pkg.details }} Premium (No Ads)</p>
             <button class="btn-main" style="margin:0; padding:12px; background:#c72cff;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})"><span class="lang-bn">কয়েন দিয়ে নিন</span><span class="lang-en">Exchange Coin</span></button>
         </div>
         {% endfor %}
@@ -1315,7 +1328,7 @@ HTML_TEMPLATE = """
         <div class="set-icon" style="background: linear-gradient(135deg, #a18cd1, #fbc2eb);">🎟</div>
         <div>
             <b style="display:block; font-size:16px;"><span class="lang-bn">কুপন কোড (রিডিম)</span><span class="lang-en">Redeem Coupon</span></b>
-            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড দিয়ে ফ্রি কয়েন বা VIP নিন</span><span class="lang-en">Redeem to get free coins/VIP</span></span>
+            <span style="color:#aaa; font-size:12px;"><span class="lang-bn">কোড দিয়ে ফ্রি কয়েন বা Premium নিন</span><span class="lang-en">Redeem to get free coins/Premium</span></span>
         </div>
     </div>
     <div class="set-item" onclick="switchNav('share')">
@@ -1330,8 +1343,8 @@ HTML_TEMPLATE = """
 <div id="page-coupon" class="page">
     <h2 style="margin-top:0;">🎟 <span class="lang-bn">কুপন কোড</span><span class="lang-en">Coupon Code</span></h2>
     <p style="font-size:13px; color:#aaa; margin-bottom:20px;">
-        <span class="lang-bn">অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি <b>ফ্রি কয়েন</b> অথবা <b>VIP</b> পাবেন!</span>
-        <span class="lang-en">Enter secret code to instantly receive <b>Free Coins</b> or <b>VIP</b>!</span>
+        <span class="lang-bn">অ্যাডমিনের দেওয়া সিক্রেট কোড বসালে আপনি <b>ফ্রি কয়েন</b> অথবা <b>Premium</b> পাবেন!</span>
+        <span class="lang-en">Enter secret code to instantly receive <b>Free Coins</b> or <b>Premium</b>!</span>
     </p>
     <div style="display:flex; gap:10px; margin-bottom:20px;">
         <input type="text" id="coupon-input" class="search-box" style="margin:0; border-radius:12px;" placeholder="Enter coupon">
@@ -1351,12 +1364,15 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
+<!-- ==================================
+    ✨ NEW NAVIGATION ORDER
+=================================== -->
 <div class="bottom-nav">
-    <div class="nav-item active" onclick="switchNav('home', this)"><span>🏠</span> All Vids</div>
-    <div class="nav-item" onclick="switchNav('earn', this)"><span>🎯</span> Earn</div>
+    <div class="nav-item active" onclick="switchNav('home', this)"><span>🏠</span> Home</div>
     <div class="nav-item" onclick="switchNav('regvids', this)"><span>👤</span> Regular</div>
-    <div class="nav-item" onclick="switchNav('premvids', this)"><span>💎</span> VIP Vids</div>
-    <div class="nav-item" onclick="switchNav('premium', this)"><span>🛒</span> VIP</div>
+    <div class="nav-item" onclick="switchNav('premvids', this)"><span>💎</span> Premium Vids</div>
+    <div class="nav-item" onclick="switchNav('earn', this)"><span>🎯</span> Earn</div>
+    <div class="nav-item" id="nav-premium" onclick="switchNav('premium', this)"><span>👑</span> Premium</div>
     <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Setting</div>
 </div>
 
@@ -1373,6 +1389,19 @@ HTML_TEMPLATE = """
     let userBalance = 0;
     let userHistory = []; 
     
+    // 🚀 SMART BROWSER REDIRECT: যেকোনো ব্রাউজার থেকে ফাস্ট কাজ করার জন্য
+    function openTgLink(url) {
+        try {
+            if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+                tg.openTelegramLink(url);
+            } else {
+                window.location.href = url;
+            }
+        } catch(e) {
+            window.location.href = url;
+        }
+    }
+
     let currentLang = localStorage.getItem('appLang') || 'bn';
     function applyLanguage() {
         let isBn = currentLang === 'bn';
@@ -1462,7 +1491,7 @@ HTML_TEMPLATE = """
     }
 
     function createCard(f) {
-        let tag = f.is_premium ? '<div class="tag-premium">💎 VIP</div>' : '<div class="tag-regular">👤 Regular</div>';
+        let tag = f.is_premium ? '<div class="tag-premium">💎 Premium</div>' : '<div class="tag-regular">👤 Regular</div>';
         
         let likesArr = Array.isArray(f.likes) ? f.likes : [];
         let likeCount = likesArr.length;
@@ -1535,7 +1564,7 @@ HTML_TEMPLATE = """
         let link = `https://t.me/${botUsername}?start=ref${userId}file${id}`;
         let text = currentLang === 'bn' ? "🔥 এই দারুণ ভিডিওটি দেখুন!" : "🔥 Watch this awesome video!";
         let shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
-        tg.openTelegramLink(shareUrl);
+        openTgLink(shareUrl);
     }
     
     let currentCommentId = null;
@@ -1587,7 +1616,7 @@ HTML_TEMPLATE = """
         } else if (adDataGlobal.show_ad) { 
             startAdProcess(); 
         } else { 
-            tg.openTelegramLink(currentDeepLink); setTimeout(() => tg.close(), 500); 
+            openTgLink(currentDeepLink); setTimeout(() => {if(tg.close) tg.close();}, 500); 
         }
     }
     
@@ -1599,22 +1628,32 @@ HTML_TEMPLATE = """
         });
         let data = await res.json();
         document.getElementById('coin-unlock-modal').style.display = 'none';
+        
         if (data.status === 'success') {
             loadUser();
-            tg.openTelegramLink(currentDeepLink);
-            setTimeout(() => tg.close(), 500);
+            openTgLink(currentDeepLink);
+            setTimeout(() => {if(tg.close) tg.close();}, 500);
         } else {
+            // 🚀 AUTO REDIRECT TO PREMIUM PAGE IF NO COINS
             tg.showAlert(data.msg);
+            if(data.msg.includes("পর্যাপ্ত কয়েন নেই") || data.msg.includes("Insufficient")) {
+                switchNav('premium', document.getElementById('nav-premium'));
+            }
         }
     }
 
+    // 🚀 RESUME PROGRESS AD SYSTEM FIX (SAVE TIME IN LOCAL STORAGE)
     function startAdProcess() {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('get-file-btn').style.display = 'none';
         document.getElementById('timer-count').style.display = 'block';
 
-        let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
-        document.getElementById('step-info').innerText = `Step ${adState.step} of ${adDataGlobal.steps}`;
+        let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
+        if (!adState) {
+            adState = { step: 1, timeLeft: adDataGlobal.wait_time };
+        }
+        
+        document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> / ${adDataGlobal.steps}`;
         document.getElementById('timer-count').innerText = adState.timeLeft;
         window.open(adDataGlobal.ad_link, '_blank');
 
@@ -1636,7 +1675,7 @@ HTML_TEMPLATE = """
                     };
                 } else {
                     let btn = document.getElementById('get-file-btn');
-                    btn.innerText = currentLang === 'bn' ? "ফাইল নিন" : "Get File Now";
+                    btn.innerText = currentLang === 'bn' ? "ফাইল নিন (Get File)" : "Get File Now";
                     btn.style.display = 'block';
                     btn.onclick = async () => {
                         localStorage.removeItem('ad_state_' + cFileId);
@@ -1645,7 +1684,7 @@ HTML_TEMPLATE = """
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({uid: userId, file_id: cFileId, method: "ad"})
                         });
-                        tg.openTelegramLink(currentDeepLink); setTimeout(()=>tg.close(), 500);
+                        openTgLink(currentDeepLink); setTimeout(()=>{if(tg.close) tg.close();}, 500);
                     };
                 }
             } else {
@@ -1697,7 +1736,7 @@ HTML_TEMPLATE = """
         if (!data.ad_link) return tg.showAlert(currentLang==='bn'?"বর্তমানে কোনো অ্যাড নেই!":"No ads available right now!");
         
         document.getElementById('ad-overlay').style.display = 'flex';
-        document.getElementById('step-info').innerText = type === 'spin' ? 'Bonus Spin Ad' : 'Bonus Task Ad';
+        document.getElementById('step-info').innerHTML = type === 'spin' ? 'Bonus Spin Ad' : 'Bonus Task Ad';
         let timeLeft = data.wait_time;
         document.getElementById('timer-count').innerText = timeLeft;
         document.getElementById('timer-count').style.display = 'block';
@@ -1733,7 +1772,7 @@ HTML_TEMPLATE = """
     
     async function startCustomTask(taskId, link) {
         document.getElementById('ad-overlay').style.display = 'flex';
-        document.getElementById('step-info').innerText = 'Custom Task';
+        document.getElementById('step-info').innerHTML = 'Custom Task';
         let timeLeft = 15;
         document.getElementById('timer-count').innerText = timeLeft;
         document.getElementById('timer-count').style.display = 'block';
@@ -1778,7 +1817,7 @@ HTML_TEMPLATE = """
     
     async function buyWithCoin(pkgId, cost) {
         if(userBalance < cost) return tg.showAlert(currentLang==='bn'?"❌ আপনার পর্যাপ্ত কয়েন নেই!":"❌ Insufficient Coins!");
-        let confirmText = currentLang === 'bn' ? `আপনি কি ${cost} কয়েন দিয়ে প্রিমিয়াম নিতে চান?` : `Buy VIP with ${cost} coins?`;
+        let confirmText = currentLang === 'bn' ? `আপনি কি ${cost} কয়েন দিয়ে প্রিমিয়াম নিতে চান?` : `Buy Premium with ${cost} coins?`;
         if(confirm(confirmText)) {
             let res = await fetch('/api/buy_with_coin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, pkg_id: pkgId }) });
             let data = await res.json();
@@ -1792,7 +1831,7 @@ HTML_TEMPLATE = """
     }
     
     function reqBuy() { 
-        tg.openTelegramLink(`https://t.me/${adminUsername}`); 
+        openTgLink(`https://t.me/${adminUsername}`); 
         tg.showAlert(currentLang==='bn'?"✅ পেমেন্ট করতে অ্যাডমিনকে ইনবক্সে মেসেজ দিন।":"✅ Inbox Admin to pay."); 
     }
 </script>
