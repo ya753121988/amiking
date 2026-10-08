@@ -74,13 +74,13 @@ admin_steps = {}
 db_client, db = None, None 
 users_col, files_col, cats_col, tasks_col, titles_col = None, None, None, None, None
 pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col = None, None, None, None, None, None 
-sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["ShilaCallApp"]
+sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["NewBot"]
 
 async def get_db(): 
     global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col, tasks_col, titles_col
     if db_client is None:
         db_client = AsyncIOMotorClient(MONGO_URI) 
-        db = db_client["ShilaCallApp"]
+        db = db_client["NewBot"]
         users_col, files_col, cats_col = db["users"], db["files"], db["categories"]
         pkgs_col, links_col, config_col = db["packages"], db["ad_links"], db["config"]
         channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"] 
@@ -144,7 +144,7 @@ async def get_extra_dbs_async():
     async for m in mongos_col.find():
         uri = m["uri"]
         if uri not in async_mongo_clients:
-            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=2000)["ShilaCallApp"]
+            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=2000)["NewBot"]
             except: continue
         dbs.append(async_mongo_clients[uri])
     return dbs
@@ -155,7 +155,7 @@ def get_extra_dbs_sync():
         for m in sync_db["mongos"].find():
             uri = m["uri"]
             if uri not in sync_mongo_clients:
-                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=2000)["ShilaCallApp"]
+                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=2000)["NewBot"]
                 except: continue
             dbs.append(sync_mongo_clients[uri])
     except: pass
