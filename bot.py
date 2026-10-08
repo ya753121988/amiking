@@ -424,7 +424,6 @@ async def start_cmd(client, message):
 
     btns = [[InlineKeyboardButton(ch["name"], url=ch["link"])] for ch in await channels_col.find({"type": "inline"}).to_list(100)]
     
-    # 🛑 ওয়েব অ্যাপ লিংকে এখন অটো ইউজারের আইডি যুক্ত করা হয়েছে
     btns.insert(0, [InlineKeyboardButton(f"🔥 Open / ওপেন {config.get('site_name', 'Glow Top')}", web_app=WebAppInfo(url=f"{WEB_URL}/?uid={uid}"))])
 
     if config.get("start_logo"):
@@ -971,7 +970,8 @@ def get_ad_api(user_id, file_id):
     if file_id in unlocked_files:
         try:
             expiry_date = datetime.fromisoformat(unlocked_files[file_id])
-            if expiry_date > datetime.now():
+            # 🛑 Changed .now() to .utcnow() to sync perfectly with UTC across all timezones
+            if expiry_date > datetime.utcnow():
                 return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
         except: pass
         
@@ -1004,9 +1004,10 @@ def unlock_file():
         
     relock_min = config.get("vid_relock_min", 1440)
     if relock_min > 0:
-        expiry = (datetime.now() + timedelta(minutes=relock_min)).isoformat()
+        # 🛑 Changed to utcnow() + 'Z' so Javascript parses the exact global time to fix the timer bug 
+        expiry = (datetime.utcnow() + timedelta(minutes=relock_min)).isoformat() + "Z"
     else:
-        expiry = (datetime.now() + timedelta(days=36500)).isoformat()
+        expiry = (datetime.utcnow() + timedelta(days=36500)).isoformat() + "Z"
 
     sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{f_id}": expiry}})
     return jsonify({"status": "success", "msg": "Unlocked!", "expiry": expiry})
@@ -1403,7 +1404,6 @@ HTML_TEMPLATE = """
 </div>
 
 <div id="page-settings" class="page">
-    <!-- 🛑 NEW PROFILE INFO SECTION -->
     <div style="text-align: center; margin-bottom: 20px;">
         <img id="user-profile-pic" src="https://placehold.co/100x100/1c1c24/ff007f?text=User" style="width: 85px; height: 85px; border-radius: 50%; border: 3px solid #00d4ff; object-fit: cover; margin-bottom: 10px; box-shadow: 0 0 15px rgba(0,212,255,0.3);">
         <h2 id="user-full-name" style="margin: 0; font-size: 22px; color: #fff;">User Name</h2>
@@ -1464,7 +1464,6 @@ HTML_TEMPLATE = """
     <div class="nav-item" onclick="switchNav('premvids', this)"><span>💎</span> Premium Vids</div>
     <div class="nav-item" onclick="switchNav('earn', this)"><span>🎯</span> Earn</div>
     <div class="nav-item" id="nav-premium" onclick="switchNav('premium', this)"><span>👑</span> Premium</div>
-    <!-- 🛑 BOTTOM NAV UPDATED TO Profile -->
     <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Profile</div>
 </div>
 
@@ -1474,7 +1473,6 @@ HTML_TEMPLATE = """
     let botUsername = "{{ bot_username }}";
     let adminUsername = "{{ config.payment_admin }}";
     
-    // 🛑 USER PROFILE DATA SYNC FIX 🛑
     let userId = 123456789;
     let urlParams = new URLSearchParams(window.location.search);
     let uidFromUrl = urlParams.get('uid');
@@ -1555,27 +1553,28 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
+    // 🛑 TIMER FIX AND UPDATE (সকল ট্যাবে টাইমার একসাথে কাজ করবে)
     function updateCountdowns() {
         let now = new Date();
         allFiles.forEach(f => {
             let fId = f._id;
-            let badge = document.querySelector(`.lock-status-${fId}`);
-            if(!badge) return;
+            let badges = document.querySelectorAll(`.lock-status-${fId}`);
+            if(badges.length === 0) return;
 
             let expiryStr = userUnlockedFiles[fId];
             let isUnlocked = false;
+            let t = "🔓 ";
             
             if (expiryStr) {
-                let expiry = new Date(expiryStr);
+                // Timezone UTC Sync Fix 
+                let safeStr = expiryStr.endsWith('Z') ? expiryStr : expiryStr + 'Z';
+                let expiry = new Date(safeStr);
                 let diff = expiry - now;
                 
                 if (diff > 0) {
                     isUnlocked = true;
-                    badge.style.border = '1px solid #00d4ff';
-                    badge.style.color = '#00ffcc';
-                    badge.style.background = 'rgba(0,212,255,0.1)';
                     if (diff > 315360000000) {
-                        badge.innerHTML = currentLang === 'bn' ? "🔓 আজীবন" : "🔓 Forever";
+                        t = currentLang === 'bn' ? "🔓 আজীবন" : "🔓 Forever";
                     } else {
                         let d = Math.floor(diff / 86400000);
                         let h = Math.floor((diff / 3600000) % 24);
@@ -1585,24 +1584,29 @@ HTML_TEMPLATE = """
                         let y = Math.floor(d / 365); d = d % 365;
                         let mo = Math.floor(d / 30); d = d % 30;
 
-                        let t = "🔓 ";
                         if(y>0) t += y + (currentLang==='bn'?"ব ":"y ");
                         if(mo>0) t += mo + (currentLang==='bn'?"মা ":"mo ");
                         if(d>0) t += d + (currentLang==='bn'?"দি ":"d ");
                         if(h>0) t += h + (currentLang==='bn'?"ঘ ":"h ");
                         if(m>0) t += m + (currentLang==='bn'?"মি ":"m ");
                         t += s + (currentLang==='bn'?"সে":"s");
-                        badge.innerHTML = t;
                     }
                 }
             }
             
-            if(!isUnlocked) {
-                badge.style.border = '1px solid #ff4d4d';
-                badge.style.color = '#ff4d4d';
-                badge.style.background = 'rgba(0,0,0,0.7)';
-                badge.innerHTML = '🔒 Locked';
-            }
+            badges.forEach(badge => {
+                if(isUnlocked) {
+                    badge.style.border = '1px solid #00d4ff';
+                    badge.style.color = '#00ffcc';
+                    badge.style.background = 'rgba(0,212,255,0.1)';
+                    badge.innerHTML = t;
+                } else {
+                    badge.style.border = '1px solid #ff4d4d';
+                    badge.style.color = '#ff4d4d';
+                    badge.style.background = 'rgba(0,0,0,0.7)';
+                    badge.innerHTML = '🔒 Locked';
+                }
+            });
         });
     }
     setInterval(updateCountdowns, 1000);
@@ -1668,13 +1672,16 @@ HTML_TEMPLATE = """
 
         let unlockTime = userUnlockedFiles[f._id];
         let isUnlocked = false;
-        if(unlockTime && new Date(unlockTime) > new Date()) isUnlocked = true;
+        if(unlockTime) {
+            let safeStr = unlockTime.endsWith('Z') ? unlockTime : unlockTime + 'Z';
+            if(new Date(safeStr) > new Date()) isUnlocked = true;
+        }
 
         return `<div class="video-card">
             <div style="position: relative;">
                 <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
                 ${tag}
-                <div class="lock-status-badge lock-status-${f._id}" style="position:absolute; bottom:10px; right:10px; background:rgba(0,0,0,0.7); border:1px solid ${isUnlocked?'#00d4ff':'#ff4d4d'}; color:${isUnlocked?'#00ffcc':'#ff4d4d'}; padding:4px 8px; border-radius:10px; font-size:11px; font-weight:bold; backdrop-filter: blur(5px);">
+                <div class="lock-status-badge lock-status-${f._id}" style="position:absolute; bottom:10px; right:10px; background:rgba(0,0,0,0.7); border:1px solid ${isUnlocked?'#00d4ff':'#ff4d4d'}; color:${isUnlocked?'#00ffcc':'#ff4d4d'}; padding:4px 8px; border-radius:10px; font-size:11px; font-weight:bold; backdrop-filter: blur(5px); z-index:10;">
                     ${isUnlocked ? '🔓' : '🔒 Locked'}
                 </div>
                 <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
@@ -1684,7 +1691,7 @@ HTML_TEMPLATE = """
                 <small style="color:#aaa;">👁 ${f.views || 0} views</small>
             </div>
             <div class="video-actions">
-                <button id="like-btn-${f._id}" style="color:${heartColor};" onclick="likeVideo('${f._id}')">❤️ <span id="like-${f._id}">${likeCount}</span></button>
+                <button id="like-btn-${f._id}" class="like-btn-cls-${f._id}" style="color:${heartColor};" onclick="likeVideo('${f._id}')">❤️ <span id="like-${f._id}" class="like-span-cls-${f._id}">${likeCount}</span></button>
                 <button onclick="openComments('${f._id}')">💬 Comment</button>
                 <button onclick="shareVideo('${f._id}')">↗️ Share</button>
             </div>
@@ -1722,21 +1729,27 @@ HTML_TEMPLATE = """
 
     renderList('home'); renderList('reg'); renderList('prem');
 
-    async function likeVideo(id) {
-        let btn = document.getElementById(`like-btn-${id}`);
-        let span = document.getElementById(`like-${id}`);
-        if (btn.style.color === 'rgb(255, 77, 77)' || btn.style.color === '#ff4d4d') return; 
+    // 🛑 লাইক ফিক্স (০ সেকেন্ডে লাইভ রিলোড ছাড়া সব জায়গায় আপডেট)
+    function likeVideo(id) {
+        let btns = document.querySelectorAll(`.like-btn-cls-${id}`);
+        let spans = document.querySelectorAll(`.like-span-cls-${id}`);
+        let alreadyLiked = false;
         
-        btn.style.color = '#ff4d4d'; 
-        span.innerText = parseInt(span.innerText || 0) + 1;
+        btns.forEach(btn => {
+            if (btn.style.color === 'rgb(255, 77, 77)' || btn.style.color === '#ff4d4d') alreadyLiked = true;
+        });
+        if (alreadyLiked) return;
+        
+        btns.forEach(btn => btn.style.color = '#ff4d4d');
+        spans.forEach(span => span.innerText = parseInt(span.innerText || 0) + 1);
         
         let file = allFiles.find(f => f._id === id);
         if(file) {
             if(!Array.isArray(file.likes)) file.likes = [];
             if(!file.likes.includes(userId)) file.likes.push(userId);
         }
-
-        await fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'like', uid:userId, file_id:id}) });
+        
+        fetch('/api/action', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'like', uid:userId, file_id:id}) });
     }
     
     function shareVideo(id) {
@@ -1825,6 +1838,7 @@ HTML_TEMPLATE = """
         }
     }
 
+    // 🛑 AD RESUME TIME FIX (ব্যাক দিলে সময় সেভ হয়ে থাকবে)
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden && isAdRunning) {
             let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
@@ -1834,7 +1848,7 @@ HTML_TEMPLATE = """
                 document.getElementById('timer-count').style.color = 'red';
                 
                 let btn = document.getElementById('get-file-btn');
-                btn.innerText = "▶️ Resume Ad / অ্যাড আবার শুরু করুন";
+                btn.innerText = currentLang === 'bn' ? "▶️ Resume Ad / অ্যাড আবার শুরু করুন" : "▶️ Resume Ad";
                 btn.style.display = 'block';
                 btn.onclick = () => { resumeAd(); };
             }
@@ -1848,23 +1862,41 @@ HTML_TEMPLATE = """
         document.getElementById('timer-count').style.color = '#f02d73';
 
         let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
-        if (!adState) {
-            adState = { step: 1, timeLeft: adDataGlobal.wait_time };
-        }
-        
-        document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> of ${adDataGlobal.steps}`;
-        document.getElementById('duration-info').innerHTML = `⏳ Duration: ${adDataGlobal.wait_time} Seconds / Step`;
-        document.getElementById('timer-count').innerText = adState.timeLeft;
         adLinkGlobal = adDataGlobal.ad_link;
-        
-        resumeAd();
+
+        if (adState && adState.timeLeft > 0 && adState.timeLeft < adDataGlobal.wait_time) {
+            // যদি আগে পজ হয়ে থাকা সময় থেকে থাকে
+            document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> of ${adDataGlobal.steps}`;
+            document.getElementById('duration-info').innerHTML = `⏳ Duration: ${adDataGlobal.wait_time} Seconds / Step`;
+            document.getElementById('timer-count').innerText = adState.timeLeft;
+            document.getElementById('timer-count').style.color = 'red';
+            
+            let btn = document.getElementById('get-file-btn');
+            btn.innerText = currentLang === 'bn' ? "▶️ Resume Ad / অ্যাড আবার শুরু করুন" : "▶️ Resume Ad";
+            btn.style.display = 'block';
+            btn.onclick = () => { resumeAd(); };
+        } else {
+            // যদি নতুন করে এড শুরু হয়
+            if (!adState || adState.timeLeft <= 0) {
+                adState = { step: 1, timeLeft: adDataGlobal.wait_time };
+            }
+            document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> of ${adDataGlobal.steps}`;
+            document.getElementById('duration-info').innerHTML = `⏳ Duration: ${adDataGlobal.wait_time} Seconds / Step`;
+            document.getElementById('timer-count').innerText = adState.timeLeft;
+            resumeAd(); 
+        }
     }
 
     function resumeAd() {
         isAdRunning = true;
         document.getElementById('get-file-btn').style.display = 'none';
         document.getElementById('timer-count').style.color = '#f02d73';
-        window.open(adLinkGlobal, '_blank');
+        
+        if (tg && tg.openLink) {
+            tg.openLink(adLinkGlobal);
+        } else {
+            window.open(adLinkGlobal, '_blank');
+        }
 
         clearInterval(timerInterval); 
         let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
@@ -1978,7 +2010,11 @@ HTML_TEMPLATE = """
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
         
-        window.open(data.ad_link, '_blank');
+        if (tg && tg.openLink) {
+            tg.openLink(data.ad_link);
+        } else {
+            window.open(data.ad_link, '_blank');
+        }
         
         clearInterval(timerInterval);
         timerInterval = setInterval(() => {
@@ -2027,7 +2063,11 @@ HTML_TEMPLATE = """
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
         
-        window.open(link, '_blank');
+        if (tg && tg.openLink) {
+            tg.openLink(link);
+        } else {
+            window.open(link, '_blank');
+        }
         
         clearInterval(timerInterval);
         timerInterval = setInterval(() => {
