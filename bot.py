@@ -969,11 +969,12 @@ def get_ad_api(user_id, file_id):
     unlocked_files = user.get("unlocked_files", {})
     if file_id in unlocked_files:
         try:
-            expiry_date = datetime.fromisoformat(unlocked_files[file_id])
-            # 🛑 Changed .now() to .utcnow() to sync perfectly with UTC across all timezones
+            # 🛑 [FIX] Removed Z forcefully before parsing to avoid Python <= 3.10 crashes which asked for ads repeatedly
+            date_str = unlocked_files[file_id].replace("Z", "")
+            expiry_date = datetime.fromisoformat(date_str)
             if expiry_date > datetime.utcnow():
                 return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
-        except: pass
+        except Exception as e: pass
         
     is_prem_vid = file_data and file_data.get("is_premium")
     if is_prem_vid:
@@ -1004,7 +1005,6 @@ def unlock_file():
         
     relock_min = config.get("vid_relock_min", 1440)
     if relock_min > 0:
-        # 🛑 Changed to utcnow() + 'Z' so Javascript parses the exact global time to fix the timer bug 
         expiry = (datetime.utcnow() + timedelta(minutes=relock_min)).isoformat() + "Z"
     else:
         expiry = (datetime.utcnow() + timedelta(days=36500)).isoformat() + "Z"
@@ -1553,7 +1553,7 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
-    // 🛑 TIMER FIX AND UPDATE (সকল ট্যাবে টাইমার একসাথে কাজ করবে)
+    // 🛑 TIMER FIX AND UPDATE
     function updateCountdowns() {
         let now = new Date();
         allFiles.forEach(f => {
@@ -1566,7 +1566,6 @@ HTML_TEMPLATE = """
             let t = "🔓 ";
             
             if (expiryStr) {
-                // Timezone UTC Sync Fix 
                 let safeStr = expiryStr.endsWith('Z') ? expiryStr : expiryStr + 'Z';
                 let expiry = new Date(safeStr);
                 let diff = expiry - now;
@@ -1729,7 +1728,6 @@ HTML_TEMPLATE = """
 
     renderList('home'); renderList('reg'); renderList('prem');
 
-    // 🛑 লাইক ফিক্স (০ সেকেন্ডে লাইভ রিলোড ছাড়া সব জায়গায় আপডেট)
     function likeVideo(id) {
         let btns = document.querySelectorAll(`.like-btn-cls-${id}`);
         let spans = document.querySelectorAll(`.like-span-cls-${id}`);
@@ -1790,6 +1788,11 @@ HTML_TEMPLATE = """
     let adLinkGlobal = "";
     let cFileId = null;
 
+    let currentAdType = null; 
+    let earnTypeGlobal = null; 
+    let earnLinkGlobal = null;
+    let earnTimeLeft = 0;
+
     async function playVideo(fileId) {
         cFileId = fileId;
         currentDeepLink = `https://t.me/${botUsername}?start=file_${fileId}`;
@@ -1838,24 +1841,44 @@ HTML_TEMPLATE = """
         }
     }
 
-    // 🛑 AD RESUME TIME FIX (ব্যাক দিলে সময় সেভ হয়ে থাকবে)
+    // 🛑 AD RESUME TIME FIX (ব্যাক দিলে সময় সেভ হয়ে থাকবে এবং পজ হবে)
     document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && isAdRunning) {
-            let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
-            if (adState && adState.timeLeft > 0) {
+        if (!document.hidden) {
+            handleAppFocus();
+        }
+    });
+
+    window.addEventListener("focus", () => {
+        handleAppFocus();
+    });
+
+    function handleAppFocus() {
+        if (isAdRunning) {
+            let timerElement = document.getElementById('timer-count');
+            let timerValue = parseInt(timerElement.innerText);
+            
+            if (timerValue > 0 && timerElement.style.display !== 'none') {
                 isAdRunning = false;
-                clearInterval(timerInterval); 
-                document.getElementById('timer-count').style.color = 'red';
+                clearInterval(timerInterval);
+                timerElement.style.color = 'red';
                 
                 let btn = document.getElementById('get-file-btn');
                 btn.innerText = currentLang === 'bn' ? "▶️ Resume Ad / অ্যাড আবার শুরু করুন" : "▶️ Resume Ad";
                 btn.style.display = 'block';
-                btn.onclick = () => { resumeAd(); };
+                
+                btn.onclick = () => { 
+                    if (currentAdType === 'video') {
+                        resumeAd();
+                    } else {
+                        resumeGenericAd();
+                    }
+                };
             }
         }
-    });
+    }
 
     function startAdProcess() {
+        currentAdType = 'video';
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('get-file-btn').style.display = 'none';
         document.getElementById('timer-count').style.display = 'block';
@@ -1865,7 +1888,6 @@ HTML_TEMPLATE = """
         adLinkGlobal = adDataGlobal.ad_link;
 
         if (adState && adState.timeLeft > 0 && adState.timeLeft < adDataGlobal.wait_time) {
-            // যদি আগে পজ হয়ে থাকা সময় থেকে থাকে
             document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> of ${adDataGlobal.steps}`;
             document.getElementById('duration-info').innerHTML = `⏳ Duration: ${adDataGlobal.wait_time} Seconds / Step`;
             document.getElementById('timer-count').innerText = adState.timeLeft;
@@ -1876,7 +1898,6 @@ HTML_TEMPLATE = """
             btn.style.display = 'block';
             btn.onclick = () => { resumeAd(); };
         } else {
-            // যদি নতুন করে এড শুরু হয়
             if (!adState || adState.timeLeft <= 0) {
                 adState = { step: 1, timeLeft: adDataGlobal.wait_time };
             }
@@ -2002,95 +2023,85 @@ HTML_TEMPLATE = """
         let data = await res.json();
         if (!data.ad_link) return alert(currentLang==='bn'?"বর্তমানে কোনো অ্যাড নেই!":"No ads available right now!");
         
+        currentAdType = 'earn';
+        earnTypeGlobal = type;
+        earnLinkGlobal = data.ad_link;
+
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = type === 'spin' ? 'Bonus Spin Ad' : 'Bonus Task Ad';
         document.getElementById('duration-info').innerHTML = `⏳ Duration: ${data.wait_time} Seconds`;
-        let timeLeft = data.wait_time;
-        document.getElementById('timer-count').innerText = timeLeft;
+        earnTimeLeft = data.wait_time;
+        document.getElementById('timer-count').innerText = earnTimeLeft;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
         
-        if (tg && tg.openLink) {
-            tg.openLink(data.ad_link);
-        } else {
-            window.open(data.ad_link, '_blank');
-        }
-        
-        clearInterval(timerInterval);
-        timerInterval = setInterval(() => {
-            timeLeft--;
-            if (timeLeft <= 0) {
-                clearInterval(timerInterval);
-                document.getElementById('timer-count').style.display = 'none';
-                let btn = document.getElementById('get-file-btn');
-                btn.innerText = "Claim Reward";
-                btn.style.display = 'block';
-                btn.onclick = async () => {
-                    let res2 = await fetch('/api/claim_earn', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({uid: userId, type: type})
-                    });
-                    let result = await res2.json();
-                    
-                    if(type === 'spin' && result.status === 'success') {
-                        document.getElementById('ad-overlay').style.display = 'none';
-                        let wheel = document.getElementById('spin-wheel');
-                        let randomDegree = Math.floor(Math.random() * 360) + 1440; 
-                        wheel.style.transform = `rotate(${randomDegree}deg)`;
-                        setTimeout(() => {
-                            alert(result.msg);
-                            loadUser();
-                        }, 3000);
-                    } else {
-                        alert(result.msg);
-                        if (result.status === 'success') loadUser();
-                        document.getElementById('ad-overlay').style.display = 'none';
-                    }
-                };
-            } else {
-                document.getElementById('timer-count').innerText = timeLeft;
-            }
-        }, 1000);
+        resumeGenericAd();
     }
     
     async function startCustomTask(taskId, link) {
+        currentAdType = 'custom';
+        earnTypeGlobal = 'custom_' + taskId;
+        earnLinkGlobal = link;
+
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = 'Custom Task';
         document.getElementById('duration-info').innerHTML = `⏳ Duration: 15 Seconds`;
-        let timeLeft = 15;
-        document.getElementById('timer-count').innerText = timeLeft;
+        earnTimeLeft = 15;
+        document.getElementById('timer-count').innerText = earnTimeLeft;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
         
+        resumeGenericAd();
+    }
+
+    function resumeGenericAd() {
+        isAdRunning = true;
+        document.getElementById('get-file-btn').style.display = 'none';
+        document.getElementById('timer-count').style.color = '#f02d73';
+        
         if (tg && tg.openLink) {
-            tg.openLink(link);
+            tg.openLink(earnLinkGlobal);
         } else {
-            window.open(link, '_blank');
+            window.open(earnLinkGlobal, '_blank');
         }
         
         clearInterval(timerInterval);
         timerInterval = setInterval(() => {
-            timeLeft--;
-            if (timeLeft <= 0) {
-                clearInterval(timerInterval);
-                document.getElementById('timer-count').style.display = 'none';
-                let btn = document.getElementById('get-file-btn');
-                btn.innerText = "Claim Reward";
-                btn.style.display = 'block';
-                btn.onclick = async () => {
-                    let res2 = await fetch('/api/claim_earn', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({uid: userId, type: 'custom_' + taskId})
-                    });
-                    let result = await res2.json();
-                    alert(result.msg);
-                    if (result.status === 'success') loadUser();
-                    document.getElementById('ad-overlay').style.display = 'none';
-                };
-            } else {
-                document.getElementById('timer-count').innerText = timeLeft;
+            if (isAdRunning) {
+                earnTimeLeft--;
+                if (earnTimeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    isAdRunning = false;
+                    document.getElementById('timer-count').style.display = 'none';
+                    let btn = document.getElementById('get-file-btn');
+                    btn.innerText = "Claim Reward";
+                    btn.style.display = 'block';
+                    btn.onclick = async () => {
+                        let res2 = await fetch('/api/claim_earn', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({uid: userId, type: earnTypeGlobal})
+                        });
+                        let result = await res2.json();
+                        
+                        if(earnTypeGlobal === 'spin' && result.status === 'success') {
+                            document.getElementById('ad-overlay').style.display = 'none';
+                            let wheel = document.getElementById('spin-wheel');
+                            let randomDegree = Math.floor(Math.random() * 360) + 1440; 
+                            wheel.style.transform = `rotate(${randomDegree}deg)`;
+                            setTimeout(() => {
+                                alert(result.msg);
+                                loadUser();
+                            }, 3000);
+                        } else {
+                            alert(result.msg);
+                            if (result.status === 'success') loadUser();
+                            document.getElementById('ad-overlay').style.display = 'none';
+                        }
+                    };
+                } else {
+                    document.getElementById('timer-count').innerText = earnTimeLeft;
+                }
             }
         }, 1000);
     }
