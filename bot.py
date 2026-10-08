@@ -83,7 +83,7 @@ async def get_db():
         db_client = AsyncIOMotorClient(MONGO_URI) 
         db = db_client["ShilaCallApp"]
         users_col, files_col, cats_col = db["users"], db["files"], db["categories"]
-        pkgs_col, links_col, config_col = db["packages"], db["ad_links"], db["config"]
+        pkgs_col, links_col, config_col = db["packages"], db["ad_links"], config_col = db["config"]
         channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"] 
         tasks_col = db["custom_tasks"]
     return db
@@ -1218,7 +1218,7 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- 🛑 NEW REGULAR CHOICE MODAL -->
+<!-- 🛑 REGULAR CHOICE MODAL -->
 <div id="regular-choice-modal" class="modal-overlay">
     <div class="modal-box">
         <button class="close-btn" onclick="document.getElementById('regular-choice-modal').style.display='none'">✖</button>
@@ -1411,7 +1411,7 @@ HTML_TEMPLATE = """
     let botUsername = "{{ bot_username }}";
     let adminUsername = "{{ config.payment_admin }}";
     
-    // 🚀 BROWSER SESSION CRASH FIX (Fail-safe for external browsers)
+    // 🚀 BROWSER SESSION CRASH FIX
     let userId = 123456789;
     if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
         userId = tg.initDataUnsafe.user.id;
@@ -1474,7 +1474,6 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
-    // 🚀 LIVE COUNTDOWN TIMER LOGIC (সব পেজের জন্য ফিক্স করা হয়েছে)
     function updateCountdowns() {
         let now = new Date();
         Object.keys(userUnlockedFiles).forEach(fId => {
@@ -1486,7 +1485,7 @@ HTML_TEMPLATE = """
             
             els.forEach(el => {
                 if (diff > 0) {
-                    if (diff > 315360000000) { // 10 years logic
+                    if (diff > 315360000000) { 
                         el.innerHTML = currentLang === 'bn' ? "🔓 আজীবন আনলক" : "🔓 Unlocked Forever";
                         el.style.display = "block";
                     } else {
@@ -1672,12 +1671,21 @@ HTML_TEMPLATE = """
         openComments(currentCommentId);
     }
 
+    // ==========================================
+    // 🛑 ROBUST TIMER & RE-AD LOGIC START 🛑
+    // ==========================================
     let currentDeepLink = "";
     let adDataGlobal = null;
     let timerInterval = null;
+    
     let isAdRunning = false;
+    let activeAdType = ""; // "video", "earn"
+    let activeEarnType = ""; 
     let adLinkGlobal = "";
     let cFileId = null;
+    let adStartTime = 0;
+    let targetWaitTime = 0;
+    let currentStep = 1;
 
     async function playVideo(fileId) {
         cFileId = fileId;
@@ -1697,48 +1705,98 @@ HTML_TEMPLATE = """
             document.getElementById('coin-unlock-price-en').innerText = adDataGlobal.coin_price;
             document.getElementById('coin-unlock-modal').style.display = 'flex';
         } else if (adDataGlobal.show_ad) { 
-            // 🛑 Regular Video Choice Popup
             document.getElementById('reg-coin-price').innerText = adDataGlobal.coin_price || 30;
             document.getElementById('regular-choice-modal').style.display = 'flex';
         } else { 
-            openTgLink(currentDeepLink); setTimeout(() => {if(tg && tg.close) tg.close();}, 500); 
+            showProcessingTimer("free");
         }
     }
     
-    async function unlockWithCoin() {
-        let res = await fetch('/api/unlock_file', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({uid: userId, file_id: cFileId, method: "coin"})
-        });
-        let data = await res.json();
+    function unlockWithCoin() {
         document.getElementById('coin-unlock-modal').style.display = 'none';
-        
-        if (data.status === 'success') {
-            loadUser();
-            openTgLink(currentDeepLink);
-            setTimeout(() => {if(tg && tg.close) tg.close();}, 500);
-        } else {
-            alert(data.msg);
-            if(data.msg.includes("পর্যাপ্ত কয়েন নেই") || data.msg.includes("Insufficient")) {
-                switchNav('premium', document.getElementById('nav-premium'));
-            }
-        }
+        document.getElementById('regular-choice-modal').style.display = 'none';
+        showProcessingTimer("coin");
     }
 
-    // 🛑 STOP TIMER IF USER COMES BACK EARLY
+    // 🛑 3 Second Processing Timer for all Unlocks (Coin/Ad/Free)
+    function showProcessingTimer(method) {
+        document.getElementById('ad-overlay').style.display = 'flex';
+        document.getElementById('step-info').innerHTML = `⏳ <span class="lang-bn">ফাইল প্রসেস হচ্ছে...</span><span class="lang-en">Processing File...</span>`;
+        document.getElementById('timer-count').style.display = 'block';
+        document.getElementById('timer-count').style.color = '#00d4ff';
+        document.getElementById('get-file-btn').style.display = 'none';
+        document.getElementById('re-ad-btn').style.display = 'none';
+        
+        let fakeTime = 3;
+        document.getElementById('timer-count').innerText = fakeTime;
+        
+        clearInterval(timerInterval);
+        timerInterval = setInterval(async () => {
+            fakeTime--;
+            document.getElementById('timer-count').innerText = fakeTime;
+            
+            if (fakeTime <= 0) {
+                clearInterval(timerInterval);
+                
+                if (method === "coin" || method === "ad") {
+                    let res = await fetch('/api/unlock_file', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({uid: userId, file_id: cFileId, method: method})
+                    });
+                    let data = await res.json();
+                    
+                    if (data.status === 'success') {
+                        loadUser();
+                        document.getElementById('ad-overlay').style.display = 'none';
+                        openTgLink(currentDeepLink);
+                        setTimeout(() => {if(tg && tg.close) tg.close();}, 500);
+                    } else {
+                        alert(data.msg);
+                        document.getElementById('ad-overlay').style.display = 'none';
+                        if(data.msg.includes("পর্যাপ্ত কয়েন নেই") || data.msg.includes("Insufficient")) {
+                            switchNav('premium', document.getElementById('nav-premium'));
+                        }
+                    }
+                } else {
+                    document.getElementById('ad-overlay').style.display = 'none';
+                    openTgLink(currentDeepLink);
+                    setTimeout(() => {if(tg && tg.close) tg.close();}, 500);
+                }
+            }
+        }, 1000);
+    }
+
+    // 🛑 STOP TIMER IF USER COMES BACK EARLY (Fixes Background Issue + Shows Re-Ad)
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden && isAdRunning) {
-            let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
-            if (adState && adState.timeLeft > 0) {
+            let timeSpent = (Date.now() - adStartTime) / 1000;
+            if (timeSpent >= targetWaitTime) {
                 isAdRunning = false;
+                document.getElementById('timer-count').style.display = 'none';
+                
+                if (activeAdType === "video") handleAdStepSuccess();
+                else if (activeAdType === "earn") showEarnClaimButton();
+                
+            } else {
+                isAdRunning = false;
+                targetWaitTime = Math.ceil(targetWaitTime - timeSpent);
+                if(targetWaitTime < 1) targetWaitTime = 1;
+                
+                if (activeAdType === "video") {
+                    let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
+                    if(adState) { adState.timeLeft = targetWaitTime; localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState)); }
+                }
+                
+                document.getElementById('timer-count').innerText = targetWaitTime;
                 document.getElementById('timer-count').style.color = 'red';
                 document.getElementById('re-ad-btn').style.display = 'block';
             }
+        } else if (document.hidden && isAdRunning) {
+            adStartTime = Date.now();
         }
     });
 
-    // 🚀 RESUME PROGRESS AD SYSTEM (PAUSE AND RE-AD ADDED)
     function startAdProcess() {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('get-file-btn').style.display = 'none';
@@ -1749,11 +1807,16 @@ HTML_TEMPLATE = """
         let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
         if (!adState) {
             adState = { step: 1, timeLeft: adDataGlobal.wait_time };
+            localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
         }
         
-        document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> / ${adDataGlobal.steps}`;
-        document.getElementById('timer-count').innerText = adState.timeLeft;
+        currentStep = adState.step;
+        targetWaitTime = adState.timeLeft;
         adLinkGlobal = adDataGlobal.ad_link;
+        activeAdType = "video";
+        
+        document.getElementById('step-info').innerHTML = `🔹 <b>Step ${currentStep}</b> / ${adDataGlobal.steps}`;
+        document.getElementById('timer-count').innerText = targetWaitTime;
         
         resumeAd();
     }
@@ -1763,53 +1826,35 @@ HTML_TEMPLATE = """
         document.getElementById('re-ad-btn').style.display = 'none';
         document.getElementById('timer-count').style.color = '#f02d73';
         window.open(adLinkGlobal, '_blank');
+        
+        adStartTime = Date.now();
+    }
 
-        clearInterval(timerInterval);
-        let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
-
-        timerInterval = setInterval(() => {
-            if (isAdRunning) {
-                adState.timeLeft--;
-                localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
-                
-                if (adState.timeLeft <= 0) {
-                    clearInterval(timerInterval);
-                    isAdRunning = false;
-                    document.getElementById('timer-count').style.display = 'none';
-                    
-                    if (adState.step < adDataGlobal.steps) {
-                        let btn = document.getElementById('get-file-btn');
-                        btn.innerText = "Next Step";
-                        btn.style.display = 'block';
-                        btn.onclick = () => {
-                            adState.step++; adState.timeLeft = adDataGlobal.wait_time;
-                            localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
-                            startAdProcess();
-                        };
-                    } else {
-                        let btn = document.getElementById('get-file-btn');
-                        btn.innerText = currentLang === 'bn' ? "ফাইল নিন (Get File)" : "Get File Now";
-                        btn.style.display = 'block';
-                        btn.onclick = async () => {
-                            localStorage.removeItem('ad_state_' + cFileId);
-                            await fetch('/api/unlock_file', {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({uid: userId, file_id: cFileId, method: "ad"})
-                            });
-                            loadUser();
-                            document.getElementById('ad-overlay').style.display = 'none';
-                            openTgLink(currentDeepLink); 
-                            setTimeout(()=>{ if(tg && tg.close) tg.close(); }, 500);
-                        };
-                    }
-                } else {
-                    document.getElementById('timer-count').innerText = adState.timeLeft;
-                }
-            }
-        }, 1000);
+    function handleAdStepSuccess() {
+        if (currentStep < adDataGlobal.steps) {
+            let btn = document.getElementById('get-file-btn');
+            btn.innerText = "Next Step";
+            btn.style.display = 'block';
+            btn.onclick = () => {
+                currentStep++; 
+                targetWaitTime = adDataGlobal.wait_time;
+                localStorage.setItem('ad_state_' + cFileId, JSON.stringify({step: currentStep, timeLeft: targetWaitTime}));
+                startAdProcess();
+            };
+        } else {
+            let btn = document.getElementById('get-file-btn');
+            btn.innerText = currentLang === 'bn' ? "ফাইল নিন (Get File)" : "Get File Now";
+            btn.style.display = 'block';
+            btn.onclick = async () => {
+                localStorage.removeItem('ad_state_' + cFileId);
+                showProcessingTimer("ad");
+            };
+        }
     }
     
+    // ==========================================
+    // 🎯 EARN COINS LOGIC (Now Uses Accurate Background Timer too!)
+    // ==========================================
     async function loadEarnData() {
         let res = await fetch('/api/earn_info/' + userId);
         let data = await res.json();
@@ -1853,75 +1898,50 @@ HTML_TEMPLATE = """
         
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = type === 'spin' ? 'Bonus Spin Ad' : 'Bonus Task Ad';
-        let timeLeft = data.wait_time;
-        document.getElementById('timer-count').innerText = timeLeft;
+        
+        targetWaitTime = data.wait_time;
+        adLinkGlobal = data.ad_link;
+        activeAdType = "earn";
+        activeEarnType = type;
+        
+        document.getElementById('timer-count').innerText = targetWaitTime;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
-        document.getElementById('re-ad-btn').style.display = 'none';
         
-        window.open(data.ad_link, '_blank');
-        
-        clearInterval(timerInterval);
-        timerInterval = setInterval(() => {
-            timeLeft--;
-            if (timeLeft <= 0) {
-                clearInterval(timerInterval);
-                document.getElementById('timer-count').style.display = 'none';
-                let btn = document.getElementById('get-file-btn');
-                btn.innerText = "Claim Reward";
-                btn.style.display = 'block';
-                btn.onclick = async () => {
-                    let res2 = await fetch('/api/claim_earn', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({uid: userId, type: type})
-                    });
-                    let result = await res2.json();
-                    alert(result.msg);
-                    if (result.status === 'success') loadUser();
-                    document.getElementById('ad-overlay').style.display = 'none';
-                };
-            } else {
-                document.getElementById('timer-count').innerText = timeLeft;
-            }
-        }, 1000);
+        resumeAd();
     }
     
     async function startCustomTask(taskId, link) {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = 'Custom Task';
-        let timeLeft = 15;
-        document.getElementById('timer-count').innerText = timeLeft;
+        
+        targetWaitTime = 15;
+        adLinkGlobal = link;
+        activeAdType = "earn";
+        activeEarnType = 'custom_' + taskId;
+        
+        document.getElementById('timer-count').innerText = targetWaitTime;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
-        document.getElementById('re-ad-btn').style.display = 'none';
         
-        window.open(link, '_blank');
-        
-        clearInterval(timerInterval);
-        timerInterval = setInterval(() => {
-            timeLeft--;
-            if (timeLeft <= 0) {
-                clearInterval(timerInterval);
-                document.getElementById('timer-count').style.display = 'none';
-                let btn = document.getElementById('get-file-btn');
-                btn.innerText = "Claim Reward";
-                btn.style.display = 'block';
-                btn.onclick = async () => {
-                    let res2 = await fetch('/api/claim_earn', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({uid: userId, type: 'custom_' + taskId})
-                    });
-                    let result = await res2.json();
-                    alert(result.msg);
-                    if (result.status === 'success') loadUser();
-                    document.getElementById('ad-overlay').style.display = 'none';
-                };
-            } else {
-                document.getElementById('timer-count').innerText = timeLeft;
-            }
-        }, 1000);
+        resumeAd();
+    }
+    
+    function showEarnClaimButton() {
+        let btn = document.getElementById('get-file-btn');
+        btn.innerText = "Claim Reward";
+        btn.style.display = 'block';
+        btn.onclick = async () => {
+            let res2 = await fetch('/api/claim_earn', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({uid: userId, type: activeEarnType})
+            });
+            let result = await res2.json();
+            alert(result.msg);
+            if (result.status === 'success') loadUser();
+            document.getElementById('ad-overlay').style.display = 'none';
+        };
     }
 
     async function redeemCoupon() {
