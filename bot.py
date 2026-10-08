@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 # ==========================================
 # 🛑 ANTI-DUPLICATE LOCK (ডাবল মেসেজ ফিক্স)
 # ==========================================
-# বট যেন ব্যাকগ্রাউন্ডে ভুল করে ২ বার রান হয়ে ডাবল মেসেজ না দেয়, তাই এই লক।
 try:
     instance_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     instance_lock.bind(("127.0.0.1", 9876))
@@ -94,7 +93,7 @@ async def get_config():
     if not conf: 
         conf = { "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0, "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে। / File will be auto-deleted after some time.", "frotect": False, "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1, "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME, "autovid_msg_id": None, "autovid_chat_id": None, "autovid_time_min": 0, "autopost_time_hr": 0, "autopost_idx": 0, "site_name": "Glow Top", 
                  "premium_vid_coin": 50, "vid_relock_min": 1440, "spin_coin_min": 10, "spin_coin_max": 50, "task_coin": 20, "spin_limit": 5, "task_limit": 5,
-                 "autopost_channel": None, "autopost_minute": 0, "autopost_channel_idx": 0 } # 🛑 Channel Autopost Config added
+                 "autopost_channel": None, "autopost_minute": 0, "autopost_channel_idx": 0 } 
         await config_col.insert_one(conf) 
     return conf
 
@@ -103,7 +102,6 @@ async def delete_msg_later(client, chat_id, msg_id, delay):
     try: await client.delete_messages(chat_id, msg_id) 
     except: pass
 
-# --- TIME FORMATTER ---
 def get_expiry_str(expiry_date): 
     if not expiry_date: return None 
     now = datetime.now() 
@@ -128,7 +126,7 @@ def get_expiry_str(expiry_date):
 def keep_alive(): 
     while True: 
         try: 
-            time.sleep(60) # 🛑 UptimeRobot Fix: 5 মিনিট থেকে ১ মিনিট করা হয়েছে
+            time.sleep(60) 
             requests.get(WEB_URL) 
         except: pass 
 threading.Thread(target=keep_alive, daemon=True).start()
@@ -141,7 +139,7 @@ sync_mongo_clients = {}
 
 async def get_extra_dbs_async():
     await get_db()
-    dbs = [db] # Main DB
+    dbs = [db] 
     async for m in mongos_col.find():
         uri = m["uri"]
         if uri not in async_mongo_clients:
@@ -151,7 +149,7 @@ async def get_extra_dbs_async():
     return dbs
 
 def get_extra_dbs_sync():
-    dbs = [sync_db] # Main DB
+    dbs = [sync_db] 
     try:
         for m in sync_db["mongos"].find():
             uri = m["uri"]
@@ -168,7 +166,7 @@ def get_extra_dbs_sync():
 async def background_tasks(): 
     last_autovid = time.time()
     last_autopost = time.time() 
-    last_channel_post = time.time() # 🛑 Channel Timer Added
+    last_channel_post = time.time() 
     while True: 
         await asyncio.sleep(60) 
         now = time.time() 
@@ -209,7 +207,6 @@ async def background_tasks():
                         except: pass
                     await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_idx": idx + 1}})
 
-            # 🛑 Auto Channel Post Logic Fix (Specific Minute Loop)
             ch_id = config.get("autopost_channel")
             ch_min = config.get("autopost_minute", 0)
             if ch_id and ch_min > 0 and (now - last_channel_post) >= (ch_min * 60):
@@ -355,7 +352,8 @@ async def start_cmd(client, message):
             "_id": uid, "name": message.from_user.first_name, 
             "balance": 0, "pending_file": None, "premium_until": None, 
             "history": [], "unlocked_files": {}, 
-            "spin_count": 0, "task_count": 0, "last_activity_date": None
+            "spin_count": 0, "task_count": 0, "last_activity_date": None,
+            "custom_tasks_done": []
         })
         if ref_by and ref_by != uid:
             if config.get("ref_on", True):
@@ -396,7 +394,6 @@ async def start_cmd(client, message):
             await target_db["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
             msg = await message.reply("⏳ আপনার ফাইল পাঠানো হচ্ছে... / Sending your file...")
             try:
-                # 🛑 অটোলিড টাইমার টেক্সট ক্যাপশনে এড করা হলো
                 del_time = config.get("auto_del_time", 0)
                 caption = f"🎬 **{file_data['title']}**"
                 if del_time > 0:
@@ -426,12 +423,24 @@ async def start_cmd(client, message):
     txt += "\n👇 নিচের বাটন থেকে অ্যাপ ওপেন করুন / Click below to open app:"
 
     btns = [[InlineKeyboardButton(ch["name"], url=ch["link"])] for ch in await channels_col.find({"type": "inline"}).to_list(100)]
-    btns.insert(0, [InlineKeyboardButton(f"🔥 Open / ওপেন {config.get('site_name', 'Glow Top')}", web_app=WebAppInfo(url=f"{WEB_URL}/"))])
+    
+    # 🛑 ওয়েব অ্যাপ লিংকে এখন অটো ইউজারের আইডি যুক্ত করা হয়েছে
+    btns.insert(0, [InlineKeyboardButton(f"🔥 Open / ওপেন {config.get('site_name', 'Glow Top')}", web_app=WebAppInfo(url=f"{WEB_URL}/?uid={uid}"))])
 
     if config.get("start_logo"):
         try: await client.send_photo(uid, photo=config.get("start_logo"), caption=txt, reply_markup=InlineKeyboardMarkup(btns))
         except: await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
-    else: await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else:
+        try:
+            photos = []
+            async for photo in client.get_chat_photos(uid, limit=1):
+                photos.append(photo)
+            if photos:
+                await client.send_photo(uid, photo=photos[0].file_id, caption=txt, reply_markup=InlineKeyboardMarkup(btns))
+            else:
+                await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+        except Exception:
+            await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex("check_join") & unique_cb) 
 async def check_join_cb(c, q): 
@@ -711,7 +720,7 @@ async def cmd_relocktime(c, m):
 
 @app.on_message(filters.command("delrelocktime") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delrelocktime(c, m): 
-    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); await m.reply("✅ Video Relock Time Deleted! (ভিডিও আর কখনো লক হবে না, আজীবন আনলক থাকবে)")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); await m.reply("✅ Video Relock Time Deleted! (ভিডিও আর কখনো লক হবেণিক, আজীবন আনলক থাকবে)")
 
 @app.on_message(filters.command("spincoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_spincoin(c, m): 
@@ -955,11 +964,9 @@ def get_ad_api(user_id, file_id):
         file_data = d["files"].find_one({"_id": file_id})
         if file_data: break
 
-    # VIP check bypasses everything
     if user and user.get("premium_until") and user["premium_until"] > datetime.now(): 
         return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
 
-    # Check if previously unlocked
     unlocked_files = user.get("unlocked_files", {})
     if file_id in unlocked_files:
         try:
@@ -978,7 +985,6 @@ def get_ad_api(user_id, file_id):
             ad_link = random.choice(links)["link"]
             wait_time = random.choice(config.get("direk_wait", [5]))
             steps = config.get("regstep", 1)
-            # 🛑 রেগুলার ভিডিওতেও coin_price পাঠানো হলো যেন পপ আপ দেখানো যায়
             return jsonify({"show_ad": True, "ad_link": ad_link, "wait_time": wait_time, "steps": steps, "requires_coin": False, "coin_price": config.get("premium_vid_coin", 50)})
             
     return jsonify({"show_ad": False, "is_unlocked": True})
@@ -1000,10 +1006,9 @@ def unlock_file():
     if relock_min > 0:
         expiry = (datetime.now() + timedelta(minutes=relock_min)).isoformat()
     else:
-        expiry = (datetime.now() + timedelta(days=36500)).isoformat() # 100 Years Forever
+        expiry = (datetime.now() + timedelta(days=36500)).isoformat()
 
     sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{f_id}": expiry}})
-    # 🛑 Fix: Expiry Return করা হলো যাতে ফ্রন্ট-এন্ডে টাইমার আপডেট হয়
     return jsonify({"status": "success", "msg": "Unlocked!", "expiry": expiry})
 
 @web.route('/api/earn_info/<int:uid>')
@@ -1013,9 +1018,10 @@ def get_earn_info(uid):
     today = datetime.now().strftime("%Y-%m-%d")
     
     if user.get("last_activity_date") != today:
-        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": today, "spin_count": 0, "task_count": 0}})
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": today, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}})
         user["spin_count"] = 0
         user["task_count"] = 0
+        user["custom_tasks_done"] = []
 
     spin_lim = config.get("spin_limit", 5)
     task_lim = config.get("task_limit", 5)
@@ -1026,7 +1032,8 @@ def get_earn_info(uid):
     return jsonify({
         "spins_done": user.get("spin_count", 0), "spin_limit": spin_lim,
         "tasks_done": user.get("task_count", 0), "task_limit": task_lim,
-        "custom_tasks": c_tasks
+        "custom_tasks": c_tasks,
+        "custom_tasks_done": user.get("custom_tasks_done", [])
     })
 
 @web.route('/api/get_earn_ad/<ad_type>')
@@ -1044,8 +1051,8 @@ def claim_earn():
     today = datetime.now().strftime("%Y-%m-%d")
     
     if user.get("last_activity_date") != today:
-        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": today, "spin_count": 0, "task_count": 0}})
-        user["spin_count"] = 0; user["task_count"] = 0
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": today, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}})
+        user["spin_count"] = 0; user["task_count"] = 0; user["custom_tasks_done"] = []
 
     if task_type == "spin":
         limit = config.get("spin_limit", 5)
@@ -1067,9 +1074,12 @@ def claim_earn():
 
     elif task_type.startswith("custom_"):
         tid = task_type.split("_")[1]
+        if tid in user.get("custom_tasks_done", []):
+            return jsonify({"status": "error", "msg": "❌ আপনি এই টাস্কটি আগেই করেছেন! / Task already done!"})
+            
         task_data = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
         if task_data:
-            sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": task_data["coin"]}})
+            sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": task_data["coin"]}, "$push": {"custom_tasks_done": tid}})
             return jsonify({"status": "success", "msg": f"🎉 টাস্ক করে {task_data['coin']} কয়েন পেয়েছেন!"})
         
     return jsonify({"status": "error", "msg": "Invalid Task"})
@@ -1195,9 +1205,9 @@ HTML_TEMPLATE = """
 
         .video-card { background: rgba(25,25,35,0.8); border-radius: 12px; margin-bottom: 20px; overflow: hidden; position: relative; border: 1px solid rgba(255,255,255,0.05); }
         .video-card img { width: 100%; height: 210px; object-fit: cover; }
-        .tag-premium { position: absolute; top: 12px; left: 12px; background: #c72cff; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(199,44,255,0.5); }
-        .tag-regular { position: absolute; top: 12px; left: 12px; background: #00d4ff; color: black; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(0,212,255,0.5); }
-        .play-btn-overlay { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); width: 55px; height: 55px; background: rgba(0,123,255,0.8); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; backdrop-filter: blur(5px); box-shadow: 0 0 15px rgba(0,123,255,0.4); }
+        .tag-premium { position: absolute; top: 12px; left: 12px; background: #c72cff; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(199,44,255,0.5); z-index: 10; }
+        .tag-regular { position: absolute; top: 12px; left: 12px; background: #00d4ff; color: black; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: bold; box-shadow: 0 2px 10px rgba(0,212,255,0.5); z-index: 10; }
+        .play-btn-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 55px; height: 55px; background: rgba(0,123,255,0.8); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; backdrop-filter: blur(5px); box-shadow: 0 0 15px rgba(0,123,255,0.4); z-index:15; }
         .play-btn-overlay::after { content: '▶'; color: white; font-size: 22px; margin-left: 4px; }
         .video-info { padding: 15px; }
         
@@ -1220,6 +1230,8 @@ HTML_TEMPLATE = """
         .ref-box button { background: rgba(255,255,255,0.1); color: #00d4ff; border: none; padding: 0 20px; font-weight: bold; cursor: pointer; }
 
         .btn-main { width: 100%; background: linear-gradient(90deg, #f02d73, #ff6b6b); padding: 16px; border-radius: 12px; font-weight: bold; border: none; color: white; font-size: 16px; cursor: pointer; }
+        .btn-main:disabled { opacity: 0.5; cursor: not-allowed; }
+        
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(8,16,22,0.98); z-index: 9999; justify-content: center; align-items: center; backdrop-filter: blur(5px); }
         .modal-box { background: rgba(30, 30, 45, 0.95); padding: 30px 25px; border-radius: 20px; text-align: center; width: 90%; max-width: 400px; border: 1px solid rgba(255,255,255,0.05); position:relative;}
         .close-btn { position: absolute; top:10px; right:15px; background:transparent; border:none; color:white; font-size:20px; cursor:pointer;}
@@ -1232,6 +1244,11 @@ HTML_TEMPLATE = """
         
         .earn-card { background: rgba(25,25,35,0.8); border: 1px solid rgba(0,212,255,0.3); padding:20px; border-radius:15px; text-align:center; margin-bottom:15px; position:relative; }
         .limit-badge { position: absolute; top:10px; right:10px; background: rgba(0,0,0,0.5); padding: 3px 8px; border-radius: 10px; font-size:11px; border: 1px solid rgba(255,255,255,0.2); }
+        
+        .wheel-container { position: relative; width: 120px; height: 120px; margin: 0 auto 15px auto; }
+        .wheel { width: 100%; height: 100%; border-radius: 50%; border: 4px solid #ffb703; background: conic-gradient(#ff6b6b 0% 16.6%, #f02d73 16.6% 33.3%, #c72cff 33.3% 50%, #00d4ff 50% 66.6%, #00ffcc 66.6% 83.3%, #ffb703 83.3% 100%); transition: transform 3s cubic-bezier(0.25, 1, 0.5, 1); transform: rotate(0deg); }
+        .wheel-pointer { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 10px solid transparent; border-right: 10px solid transparent; border-top: 15px solid white; z-index: 10; }
+        .wheel-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 30px; height: 30px; background: #fff; border-radius: 50%; z-index: 5; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
     </style>
 </head>
 <body>
@@ -1258,7 +1275,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- 🛑 NEW REGULAR CHOICE MODAL -->
 <div id="regular-choice-modal" class="modal-overlay">
     <div class="modal-box">
         <button class="close-btn" onclick="document.getElementById('regular-choice-modal').style.display='none'">✖</button>
@@ -1273,9 +1289,10 @@ HTML_TEMPLATE = """
 <div id="ad-overlay" class="modal-overlay">
     <div class="modal-box" style="background: rgba(20,20,30,0.95); border: 2px solid #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.4); border-radius: 20px;">
         <h2 style="color: #00d4ff; margin-top: 0;">🚀 Ad Verification</h2>
-        <div style="background: rgba(0,0,0,0.4); padding: 10px; border-radius: 12px; margin-bottom: 15px; font-weight:bold; color: #fff; font-size: 15px; border: 1px solid rgba(255,255,255,0.1);" id="step-info">
+        <div style="background: rgba(0,0,0,0.4); padding: 10px; border-radius: 12px; margin-bottom: 5px; font-weight:bold; color: #fff; font-size: 15px; border: 1px solid rgba(255,255,255,0.1);" id="step-info">
             Step 1 of 1
         </div>
+        <div id="duration-info" style="font-size: 12px; color: #aaa; margin-bottom: 15px;">⏳ Duration: 5 Seconds / Step</div>
         <div style="position: relative; width: 120px; height: 120px; margin: 0 auto 15px auto; border-radius: 50%; border: 4px solid rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center; background: radial-gradient(circle, rgba(255,0,127,0.2) 0%, transparent 70%);">
             <h1 id="timer-count" style="font-size:50px; color:#f02d73; margin:0;">5</h1>
             <span style="position: absolute; bottom: 15px; font-size: 11px; color: #aaa;">Seconds</span>
@@ -1285,8 +1302,6 @@ HTML_TEMPLATE = """
             <span class="lang-en">Watch the ad completely. Timer pauses if you go back.</span>
         </p>
         <button id="get-file-btn" class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; display:none; font-weight: bold; font-size: 18px; padding: 12px;">Next Step</button>
-        <!-- 🛑 RE-AD BUTTON ADDED HERE -->
-        <button id="re-ad-btn" class="btn-main" style="background: linear-gradient(90deg, #ff0000, #ff7300); color:white; display:none; font-weight: bold; font-size: 18px; padding: 12px; margin-top: 10px;" onclick="resumeAd()">🔄 Re-Ad / আবার অ্যাড দেখুন</button>
     </div>
 </div>
 
@@ -1388,12 +1403,19 @@ HTML_TEMPLATE = """
 </div>
 
 <div id="page-settings" class="page">
+    <!-- 🛑 NEW PROFILE INFO SECTION -->
+    <div style="text-align: center; margin-bottom: 20px;">
+        <img id="user-profile-pic" src="https://placehold.co/100x100/1c1c24/ff007f?text=User" style="width: 85px; height: 85px; border-radius: 50%; border: 3px solid #00d4ff; object-fit: cover; margin-bottom: 10px; box-shadow: 0 0 15px rgba(0,212,255,0.3);">
+        <h2 id="user-full-name" style="margin: 0; font-size: 22px; color: #fff;">User Name</h2>
+        <p id="user-username" style="margin: 5px 0 0 0; color: #aaa; font-size: 14px;">@username</p>
+        <p style="margin: 5px 0 0 0; color: #666; font-size: 12px;">ID: <span id="set-id"></span></p>
+        <div id="mem-status" style="display:inline-block; padding:5px 15px; border-radius:15px; font-size:12px; font-weight:bold; background:rgba(255,255,255,0.1); margin-top:10px;">👤 Regular Member</div>
+        <div id="mem-expiry" style="color:#ffb703; font-size:11px; margin-top:5px; display:none;"></div>
+    </div>
+
     <div class="balance-card">
         <p style="margin:0; color:#aaa; font-size:12px; letter-spacing:1px;"><span class="lang-bn">আপনার ব্যালেন্স</span><span class="lang-en">YOUR BALANCE</span></p>
         <h1 style="color:#ffb703; margin:15px 0 10px 0; font-size:48px;">🏛 <span id="set-balance">0</span></h1>
-        <p style="margin:0; color:#666; font-size:12px; margin-bottom:5px;">ID: <span id="set-id"></span></p>
-        <div id="mem-status" style="display:inline-block; padding:5px 15px; border-radius:15px; font-size:12px; font-weight:bold; background:rgba(255,255,255,0.1); margin-top:5px;">👤 Regular Member</div>
-        <div id="mem-expiry" style="color:#ffb703; font-size:11px; margin-top:5px; display:none;"></div>
     </div>
     
     <div class="set-item" onclick="switchNav('coupon')">
@@ -1442,7 +1464,8 @@ HTML_TEMPLATE = """
     <div class="nav-item" onclick="switchNav('premvids', this)"><span>💎</span> Premium Vids</div>
     <div class="nav-item" onclick="switchNav('earn', this)"><span>🎯</span> Earn</div>
     <div class="nav-item" id="nav-premium" onclick="switchNav('premium', this)"><span>👑</span> Premium</div>
-    <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Setting</div>
+    <!-- 🛑 BOTTOM NAV UPDATED TO Profile -->
+    <div class="nav-item" onclick="switchNav('settings', this)"><span>⚙️</span> Profile</div>
 </div>
 
 <script>
@@ -1451,13 +1474,31 @@ HTML_TEMPLATE = """
     let botUsername = "{{ bot_username }}";
     let adminUsername = "{{ config.payment_admin }}";
     
-    // 🚀 BROWSER SESSION CRASH FIX (Fail-safe for external browsers)
+    // 🛑 USER PROFILE DATA SYNC FIX 🛑
     let userId = 123456789;
+    let urlParams = new URLSearchParams(window.location.search);
+    let uidFromUrl = urlParams.get('uid');
+
     if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
-        userId = tg.initDataUnsafe.user.id;
+        let u = tg.initDataUnsafe.user;
+        userId = u.id;
         localStorage.setItem("tg_user_id", userId);
+        
+        document.getElementById('user-full-name').innerText = (u.first_name + " " + (u.last_name || "")).trim();
+        if (u.username) document.getElementById('user-username').innerText = "@" + u.username;
+        else document.getElementById('user-username').style.display = 'none';
+        
+        if (u.photo_url) document.getElementById('user-profile-pic').src = u.photo_url;
+        
+    } else if (uidFromUrl) {
+        userId = parseInt(uidFromUrl);
+        localStorage.setItem("tg_user_id", userId);
+        document.getElementById('user-full-name').innerText = "User " + userId;
+        document.getElementById('user-username').style.display = 'none';
     } else if (localStorage.getItem("tg_user_id")) {
         userId = parseInt(localStorage.getItem("tg_user_id"));
+        document.getElementById('user-full-name').innerText = "User " + userId;
+        document.getElementById('user-username').style.display = 'none';
     }
     
     document.getElementById('set-id').innerText = userId;
@@ -1514,21 +1555,27 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
-    // 🚀 LIVE COUNTDOWN TIMER LOGIC (সব পেজের জন্য ফিক্স করা হয়েছে)
     function updateCountdowns() {
         let now = new Date();
-        Object.keys(userUnlockedFiles).forEach(fId => {
-            let els = document.querySelectorAll(`.countdown-${fId}`);
-            if (els.length === 0) return;
+        allFiles.forEach(f => {
+            let fId = f._id;
+            let badge = document.querySelector(`.lock-status-${fId}`);
+            if(!badge) return;
+
+            let expiryStr = userUnlockedFiles[fId];
+            let isUnlocked = false;
             
-            let expiry = new Date(userUnlockedFiles[fId]);
-            let diff = expiry - now;
-            
-            els.forEach(el => {
+            if (expiryStr) {
+                let expiry = new Date(expiryStr);
+                let diff = expiry - now;
+                
                 if (diff > 0) {
-                    if (diff > 315360000000) { // 10 years logic
-                        el.innerHTML = currentLang === 'bn' ? "🔓 আজীবন আনলক" : "🔓 Unlocked Forever";
-                        el.style.display = "block";
+                    isUnlocked = true;
+                    badge.style.border = '1px solid #00d4ff';
+                    badge.style.color = '#00ffcc';
+                    badge.style.background = 'rgba(0,212,255,0.1)';
+                    if (diff > 315360000000) {
+                        badge.innerHTML = currentLang === 'bn' ? "🔓 আজীবন" : "🔓 Forever";
                     } else {
                         let d = Math.floor(diff / 86400000);
                         let h = Math.floor((diff / 3600000) % 24);
@@ -1545,14 +1592,17 @@ HTML_TEMPLATE = """
                         if(h>0) t += h + (currentLang==='bn'?"ঘ ":"h ");
                         if(m>0) t += m + (currentLang==='bn'?"মি ":"m ");
                         t += s + (currentLang==='bn'?"সে":"s");
-                        
-                        el.innerHTML = t;
-                        el.style.display = "block";
+                        badge.innerHTML = t;
                     }
-                } else {
-                    el.style.display = "none";
                 }
-            });
+            }
+            
+            if(!isUnlocked) {
+                badge.style.border = '1px solid #ff4d4d';
+                badge.style.color = '#ff4d4d';
+                badge.style.background = 'rgba(0,0,0,0.7)';
+                badge.innerHTML = '🔒 Locked';
+            }
         });
     }
     setInterval(updateCountdowns, 1000);
@@ -1616,11 +1666,19 @@ HTML_TEMPLATE = """
         let isLiked = likesArr.includes(userId);
         let heartColor = isLiked ? '#ff4d4d' : 'white';
 
+        let unlockTime = userUnlockedFiles[f._id];
+        let isUnlocked = false;
+        if(unlockTime && new Date(unlockTime) > new Date()) isUnlocked = true;
+
         return `<div class="video-card">
-            <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
-            ${tag}
-            <div class="countdown-badge countdown-${f._id}" style="display:none; position:absolute; bottom:60px; right:10px; background:rgba(0,0,0,0.85); border:1px solid #00d4ff; color:#00ffcc; padding:6px 10px; border-radius:8px; font-size:11px; font-weight:bold; z-index:10; box-shadow: 0 0 10px rgba(0,212,255,0.3);"></div>
-            <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
+            <div style="position: relative;">
+                <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
+                ${tag}
+                <div class="lock-status-badge lock-status-${f._id}" style="position:absolute; bottom:10px; right:10px; background:rgba(0,0,0,0.7); border:1px solid ${isUnlocked?'#00d4ff':'#ff4d4d'}; color:${isUnlocked?'#00ffcc':'#ff4d4d'}; padding:4px 8px; border-radius:10px; font-size:11px; font-weight:bold; backdrop-filter: blur(5px);">
+                    ${isUnlocked ? '🔓' : '🔒 Locked'}
+                </div>
+                <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
+            </div>
             <div class="video-info">
                 <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title} <small style="color:#00d4ff;">[ID: ${f._id}]</small></b>
                 <small style="color:#aaa;">👁 ${f.views || 0} views</small>
@@ -1737,7 +1795,6 @@ HTML_TEMPLATE = """
             document.getElementById('coin-unlock-price-en').innerText = adDataGlobal.coin_price;
             document.getElementById('coin-unlock-modal').style.display = 'flex';
         } else if (adDataGlobal.show_ad) { 
-            // 🛑 Regular Video Choice Popup
             document.getElementById('reg-coin-price').innerText = adDataGlobal.coin_price || 30;
             document.getElementById('regular-choice-modal').style.display = 'flex';
         } else { 
@@ -1755,8 +1812,8 @@ HTML_TEMPLATE = """
         document.getElementById('coin-unlock-modal').style.display = 'none';
         
         if (data.status === 'success') {
-            if(data.expiry) userUnlockedFiles[cFileId] = data.expiry; // 🛑 Update UI Timer instantly
-            updateCountdowns(); // 🛑 Refresh timers
+            if(data.expiry) userUnlockedFiles[cFileId] = data.expiry; 
+            updateCountdowns();
             loadUser();
             openTgLink(currentDeepLink);
             setTimeout(() => {if(tg && tg.close) tg.close();}, 500);
@@ -1768,24 +1825,25 @@ HTML_TEMPLATE = """
         }
     }
 
-    // 🛑 STOP TIMER IF USER COMES BACK EARLY FIX 🛑
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden && isAdRunning) {
             let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
             if (adState && adState.timeLeft > 0) {
                 isAdRunning = false;
-                clearInterval(timerInterval); // 🛑 টাইমার বন্ধ হবে
+                clearInterval(timerInterval); 
                 document.getElementById('timer-count').style.color = 'red';
-                document.getElementById('re-ad-btn').style.display = 'block'; // 🛑 রি-অ্যাড বাটন শো করবে
+                
+                let btn = document.getElementById('get-file-btn');
+                btn.innerText = "▶️ Resume Ad / অ্যাড আবার শুরু করুন";
+                btn.style.display = 'block';
+                btn.onclick = () => { resumeAd(); };
             }
         }
     });
 
-    // 🚀 RESUME PROGRESS AD SYSTEM
     function startAdProcess() {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('get-file-btn').style.display = 'none';
-        document.getElementById('re-ad-btn').style.display = 'none';
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('timer-count').style.color = '#f02d73';
 
@@ -1794,7 +1852,8 @@ HTML_TEMPLATE = """
             adState = { step: 1, timeLeft: adDataGlobal.wait_time };
         }
         
-        document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> / ${adDataGlobal.steps}`;
+        document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> of ${adDataGlobal.steps}`;
+        document.getElementById('duration-info').innerHTML = `⏳ Duration: ${adDataGlobal.wait_time} Seconds / Step`;
         document.getElementById('timer-count').innerText = adState.timeLeft;
         adLinkGlobal = adDataGlobal.ad_link;
         
@@ -1803,11 +1862,11 @@ HTML_TEMPLATE = """
 
     function resumeAd() {
         isAdRunning = true;
-        document.getElementById('re-ad-btn').style.display = 'none';
+        document.getElementById('get-file-btn').style.display = 'none';
         document.getElementById('timer-count').style.color = '#f02d73';
         window.open(adLinkGlobal, '_blank');
 
-        clearInterval(timerInterval); // 🛑 ডাবল টাইমার যেন না উঠে তাই ফিক্স করা হলো
+        clearInterval(timerInterval); 
         let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
 
         timerInterval = setInterval(() => {
@@ -1831,7 +1890,7 @@ HTML_TEMPLATE = """
                         };
                     } else {
                         let btn = document.getElementById('get-file-btn');
-                        btn.innerText = currentLang === 'bn' ? "ফাইল নিন (Get File)" : "Get File Now";
+                        btn.innerText = currentLang === 'bn' ? "ফাইল আনলক করুন (Unlock Video)" : "Unlock Video";
                         btn.style.display = 'block';
                         btn.onclick = async () => {
                             localStorage.removeItem('ad_state_' + cFileId);
@@ -1841,8 +1900,8 @@ HTML_TEMPLATE = """
                                 body: JSON.stringify({uid: userId, file_id: cFileId, method: "ad"})
                             });
                             let d = await response.json();
-                            if(d.expiry) userUnlockedFiles[cFileId] = d.expiry; // 🛑 Update UI Timer instantly
-                            updateCountdowns(); // 🛑 Refresh UI
+                            if(d.expiry) userUnlockedFiles[cFileId] = d.expiry;
+                            updateCountdowns(); 
                             loadUser();
                             document.getElementById('ad-overlay').style.display = 'none';
                             openTgLink(currentDeepLink); 
@@ -1863,29 +1922,43 @@ HTML_TEMPLATE = """
         let html = `
         <div class="earn-card">
             <div class="limit-badge">${data.spins_done}/${data.spin_limit} Today</div>
-            <div style="font-size:40px;">🎰</div>
+            <div class="wheel-container">
+                <div class="wheel-pointer"></div>
+                <div class="wheel" id="spin-wheel"></div>
+                <div class="wheel-center"></div>
+            </div>
             <h3>Daily Spin Bonus</h3>
             <p style="font-size:12px; color:#aaa; margin-bottom:15px;">Watch an ad to spin and win random coins!</p>
-            <button class="btn-main" style="background: linear-gradient(90deg, #ffb703, #ff6b6b);" onclick="startEarnAd('spin')" ${data.spins_done>=data.spin_limit?'disabled':''}>Spin & Earn</button>
+            <button id="spin-btn" class="btn-main" style="background: linear-gradient(90deg, #ffb703, #ff6b6b);" onclick="startEarnAd('spin')" ${data.spins_done>=data.spin_limit?'disabled':''}>Spin & Earn</button>
         </div>
+        `;
         
+        let isTaskDone = data.tasks_done >= data.task_limit;
+        let taskBtnStyle = isTaskDone ? "background: #555; color: #888;" : "background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black;";
+        let taskBtnText = isTaskDone ? "Completed" : "Complete Task";
+
+        html += `
         <div class="earn-card">
             <div class="limit-badge">${data.tasks_done}/${data.task_limit} Today</div>
             <div style="font-size:40px;">📱</div>
             <h3>Daily Click Task</h3>
             <p style="font-size:12px; color:#aaa; margin-bottom:15px;">Click and visit the ad completely to get fixed coins!</p>
-            <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black;" onclick="startEarnAd('task')" ${data.tasks_done>=data.task_limit?'disabled':''}>Complete Task</button>
+            <button class="btn-main" style="${taskBtnStyle}" onclick="startEarnAd('task')" ${isTaskDone?'disabled':''}>${taskBtnText}</button>
         </div>`;
         
         if(data.custom_tasks && data.custom_tasks.length > 0) {
             html += `<h3 style="margin-top:25px;">⚡ Unlimited Custom Tasks</h3>`;
+            let doneTasks = data.custom_tasks_done || [];
             data.custom_tasks.forEach(t => {
+                let isDone = doneTasks.includes(t._id);
+                let btnStyle = isDone ? "background: #555; color: #888; cursor: not-allowed;" : "background: linear-gradient(90deg, #c72cff, #ff007f);";
+                let btnText = isDone ? "Completed" : `Complete for ${t.coin}C`;
                 html += `
                 <div class="earn-card" style="padding:15px;">
                     <div style="font-size:25px;">💎</div>
                     <h4 style="margin:5px 0;">${t.title}</h4>
                     <p style="font-size:12px; color:#aaa; margin-bottom:10px;">Reward: ${t.coin} Coins</p>
-                    <button class="btn-main" style="background: linear-gradient(90deg, #c72cff, #ff007f); padding:10px;" onclick="startCustomTask('${t._id}', '${t.link}')">Complete for ${t.coin}C</button>
+                    <button class="btn-main" style="${btnStyle} padding:10px;" onclick="startCustomTask('${t._id}', '${t.link}')" ${isDone?'disabled':''}>${btnText}</button>
                 </div>`;
             });
         }
@@ -1899,11 +1972,11 @@ HTML_TEMPLATE = """
         
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = type === 'spin' ? 'Bonus Spin Ad' : 'Bonus Task Ad';
+        document.getElementById('duration-info').innerHTML = `⏳ Duration: ${data.wait_time} Seconds`;
         let timeLeft = data.wait_time;
         document.getElementById('timer-count').innerText = timeLeft;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
-        document.getElementById('re-ad-btn').style.display = 'none';
         
         window.open(data.ad_link, '_blank');
         
@@ -1923,9 +1996,21 @@ HTML_TEMPLATE = """
                         body: JSON.stringify({uid: userId, type: type})
                     });
                     let result = await res2.json();
-                    alert(result.msg);
-                    if (result.status === 'success') loadUser();
-                    document.getElementById('ad-overlay').style.display = 'none';
+                    
+                    if(type === 'spin' && result.status === 'success') {
+                        document.getElementById('ad-overlay').style.display = 'none';
+                        let wheel = document.getElementById('spin-wheel');
+                        let randomDegree = Math.floor(Math.random() * 360) + 1440; 
+                        wheel.style.transform = `rotate(${randomDegree}deg)`;
+                        setTimeout(() => {
+                            alert(result.msg);
+                            loadUser();
+                        }, 3000);
+                    } else {
+                        alert(result.msg);
+                        if (result.status === 'success') loadUser();
+                        document.getElementById('ad-overlay').style.display = 'none';
+                    }
                 };
             } else {
                 document.getElementById('timer-count').innerText = timeLeft;
@@ -1936,11 +2021,11 @@ HTML_TEMPLATE = """
     async function startCustomTask(taskId, link) {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('step-info').innerHTML = 'Custom Task';
+        document.getElementById('duration-info').innerHTML = `⏳ Duration: 15 Seconds`;
         let timeLeft = 15;
         document.getElementById('timer-count').innerText = timeLeft;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
-        document.getElementById('re-ad-btn').style.display = 'none';
         
         window.open(link, '_blank');
         
@@ -2005,7 +2090,6 @@ HTML_TEMPLATE = """
 
 @web.route('/') 
 def home(): 
-    # ফ্লাস্কে সকল ডাটাবেস থেকে ফাইল ফেচ করা হচ্ছে 
     files = []
     for d in get_extra_dbs_sync():
         files.extend(list(d["files"].find().sort("_id", -1)))
