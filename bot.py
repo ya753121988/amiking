@@ -17,7 +17,7 @@ except socket.error:
 loop = asyncio.new_event_loop() 
 asyncio.set_event_loop(loop)
 
-from pyrogram import Client, filters, idle 
+from pyrogram import Client, filters, idle, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo 
 from pyrogram.errors import UserNotParticipant, FloodWait 
 from flask import Flask, render_template_string, jsonify, request 
@@ -72,12 +72,12 @@ web = Flask(__name__)
 admin_steps = {}
 
 db_client, db = None, None 
-users_col, files_col, cats_col, tasks_col = None, None, None, None
+users_col, files_col, cats_col, tasks_col, titles_col = None, None, None, None, None
 pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col = None, None, None, None, None, None 
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["ShilaCallApp"]
 
 async def get_db(): 
-    global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col, tasks_col
+    global db_client, db, users_col, files_col, cats_col, pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col, tasks_col, titles_col
     if db_client is None:
         db_client = AsyncIOMotorClient(MONGO_URI) 
         db = db_client["ShilaCallApp"]
@@ -85,6 +85,7 @@ async def get_db():
         pkgs_col, links_col, config_col = db["packages"], db["ad_links"], db["config"]
         channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"] 
         tasks_col = db["custom_tasks"]
+        titles_col = db["auto_titles"]
     return db
 
 async def get_config(): 
@@ -161,7 +162,7 @@ def get_extra_dbs_sync():
     return dbs
 
 # ==========================================
-# 3. BACKGROUND TASKS (Fixed Base64 Bug)
+# 3. BACKGROUND TASKS
 # ==========================================
 async def background_tasks(): 
     last_autovid = time.time()
@@ -238,7 +239,7 @@ async def background_tasks():
                     ])
                     try:
                         await app.send_photo(
-                            ch_id,
+                            int(ch_id),
                             photo=get_tg_photo(f.get("thumb_url")),
                             caption=f"🔥 **New Trending Video!**\n\n🎬 **{f['title']}**\n\n👇 নিচের লিংকে বা বাটনে ক্লিক করে সম্পূর্ণ ভিডিও দেখুন!",
                             reply_markup=btn
@@ -262,19 +263,21 @@ async def cmd_list(c, m):
     🛠 **সকল কমান্ড লিস্ট / All Commands List:**
 
 🔸 **Basic Commands:**
-`/myid` - আইডি দেখতে (Check ID)
+`/myid` - আইডি দেখতে
 `/stats` - ইউজারের সংখ্যা ও স্ট্যাটিস্টিকস
-`/name <Name>` - ওয়েবসাইটের নাম পরিবর্তন (Change Website Name)
+`/name <Name>` - ওয়েবসাইটের নাম পরিবর্তন
 
 🔸 **File Management:**
-`/addfile` - ম্যানুয়ালি ফাইল যোগ করুন (Step-by-step)
-`/auto` - ভিডিওতে রিপ্লাই করে অটো ফাইল + 4x2 (৮ পিক) থাম্বনেইল গ্রিড তৈরি ও অটো ক্যাপশন সেট করতে।
+`/addfile` - ম্যানুয়ালি ফাইল যোগ করুন
+`/vidtitel <Title>` - অটো ভিডিওর জন্য টাইটেল অ্যাড করতে 
+`/deltitel` - সেভ করা টাইটেল ডিলিট করতে
+`/auto` - ভিডিওতে রিপ্লাই করে অটো ফাইল + 4x2 (৮ পিক) থাম্বনেইল গ্রিড তৈরি (লিস্ট থেকে সিলেক্ট করে)
 `/delfile <file_id>` - ফাইল ডিলিট করতে
 `/delall` - সকল ডাটাবেসের সব ফাইল ডিলিট করতে
 
 🔸 **Tasks & Spin limits:**
-`/spinlimit <Num>` - ইউজারের ডেইলি স্পিন লিমিট (ex: /spinlimit 5)
-`/tasklimit <Num>` - ইউজারের ডেইলি ডিফল্ট টাস্ক লিমিট
+`/spinlimit <Num>` - ডেইলি স্পিন লিমিট
+`/tasklimit <Num>` - ডেইলি ডিফল্ট টাস্ক লিমিট
 `/addtask <Title> | <Link> | <Coin>` - নতুন কাস্টম আনলিমিটেড টাস্ক অ্যাড
 `/deltask` - কাস্টম টাস্ক ডিলিট করতে
 
@@ -284,36 +287,36 @@ async def cmd_list(c, m):
 `/mongostats` - ডাটাবেস স্টোরেজ চেক করতে
 
 🔸 **Coins & Pricing:**
-`/setpremcoin <Coin>` - প্রিমিয়াম ভিডিওর দাম নির্ধারণ (ex: /setpremcoin 50)
-`/spincoin <Min-Max>` - স্পিন কয়েনের রেঞ্জ (ex: /spincoin 10-50)
-`/taskcoin <Coin>` - টাস্ক কমপ্লিট করার কয়েন (ex: /taskcoin 20)
-`/relocktime <Min>` - ভিডিও কতক্ষণ পর আবার লক হবে (ex: /relocktime 1440)
-`/delrelocktime` - ভিডিও আনলক টাইমার ডিলিট করতে (কখনো লক হবেণিক)
+`/setpremcoin <Coin>` - প্রিমিয়াম ভিডিওর দাম
+`/spincoin <Min-Max>` - স্পিন কয়েনের রেঞ্জ
+`/taskcoin <Coin>` - টাস্ক কমপ্লিট করার কয়েন
+`/relocktime <Min>` - ভিডিও কতক্ষণ পর আবার লক হবে
+`/delrelocktime` - ভিডিও আনলক টাইমার ডিলিট করতে
 `/lockall` - সকল ইউজারের আনলক করা ভিডিও রিস্টার্ট/লক করতে।
 
 🔸 **Links & Ads:**
 `/addlink <link>` - ডাইরেক্ট অ্যাড লিংক যোগ করতে
 `/delink` - অ্যাড লিংক রিমুভ করতে
-`/prstep <step>` - প্রিমিয়াম অ্যাড স্টেপ সেট করতে (ex: /prstep 2)
-`/regstep <step>` - রেগুলার অ্যাড স্টেপ সেট করতে (ex: /regstep 1)
+`/prstep <step>` - প্রিমিয়াম অ্যাড স্টেপ সেট করতে
+`/regstep <step>` - রেগুলার অ্যাড স্টেপ সেট করতে
 
 🔸 **Channels & Broadcast:**
 `/addcnl <Name> <Link>` - ইনলাইন চ্যানেল লিংক অ্যাড করতে
 `/vercnl <ChatID> <Link>` - Must Join (Force Sub) চ্যানেল অ্যাড করতে
-`/brodcast` - সকল ইউজারকে মেসেজ পাঠাতে (কোনো মেসেজে রিপ্লাই করে)
-`/cnlbdcst <ChatID>` - নির্দিষ্ট গ্রুপ/চ্যানেলে মেসেজ পাঠাতে (রিপ্লাই করে)
-`/autochannel <ChatID> <Min>` - নির্দিষ্ট চ্যানেলে অটোমেটিক ভিডিও নোটিফিকেশন পাঠাতে।
+`/brodcast` - সকল ইউজারকে মেসেজ পাঠাতে (বাটন/ফাইল/ছবিতে রিপ্লাই করে)
+`/cnlbdcst` - বটের সকল এডমিন চ্যানেলে/গ্রুপে একসাথে মেসেজ পাঠাতে (রিপ্লাই করে)
+`/autochannel <ChatID> <Min>` - নির্দিষ্ট চ্যানেলে অটোমেটিক ভিডিও পোস্ট
 
 🔸 **Coupons & Packages:**
 `/allred <Limit> <Min-Max>` - অটো রেন্ডম কুপন তৈরি করতে
 `/addcred <Coins> = <Amt> <Unit>` - কয়েন প্যাকেজ তৈরি (ex: /addcred 500 = 7 d)
-`/bdt <Price> <Days>` - বিকাশ প্যাকেজ তৈরি
-`/usd <Price> <Days>` - USD প্যাকেজ তৈরি
-`/delcred` - যেকোনো তৈরি করা প্যাকেজ ডিলিট করতে 
+`/bdt <Coins> <Price>` - বিকাশ প্যাকেজ তৈরি (ex: /bdt 100 30)
+`/usd <Coins> <Price>` - USD প্যাকেজ তৈরি (ex: /usd 5 30)
+`/delcred` - যেকোনো প্যাকেজ ডিলিট করতে
 
 🔸 **Auto Delete & Others:**
-`/autodel <sec>` - ভিডিও অটো ডিলিট টাইম সেট করতে (ex: /autodel 60)
-`/frotect <on/off>` - মেসেজ ফরওয়ার্ড/সেভ অফ করতে (ex: /frotect on)
+`/autodel <sec>` - ভিডিও অটো ডিলিট টাইম
+`/frotect <on/off>` - মেসেজ ফরওয়ার্ড/সেভ অফ করতে
 `/addadmin <username>` - পেমেন্ট অ্যাডমিন সেট করতে
     """
     await m.reply(text)
@@ -537,40 +540,66 @@ async def handle_admin_file(c, m):
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
 
+
+# ==========================================
+# 🛑 AUTO TITLE MANAGEMENT & AUTO UPLOAD 🛑
+# ==========================================
+@app.on_message(filters.command("vidtitel") & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_vidtitel(c, m):
+    title = m.text.replace("/vidtitel", "").strip()
+    if not title: return await m.reply("❌ সঠিক নিয়ম: `/vidtitel <Title>`\nউদাহরণ: `/vidtitel নিউ ভাইরাল সেক্স ভিডিও`")
+    await get_db()
+    await titles_col.insert_one({"title": title})
+    await m.reply(f"✅ নতুন টাইটেল অ্যাড হয়েছে:\n**{title}**")
+
+@app.on_message(filters.command("deltitel") & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_deltitel(c, m):
+    await get_db()
+    titles = await titles_col.find().to_list(100)
+    if not titles: return await m.reply("❌ কোনো সেভ করা টাইটেল নেই!")
+    btns = [[InlineKeyboardButton(f"❌ {t['title'][:25]}", callback_data=f"delttl_{t['_id']}")] for t in titles]
+    await m.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^delttl_") & filters.user(ADMIN_ID) & unique_cb)
+async def delttl_cb(c, q):
+    await get_db()
+    await titles_col.delete_one({"_id": ObjectId(q.data.split("_")[1])})
+    await q.message.edit_text("✅ টাইটেল ডিলিট করা হয়েছে!")
+
 @app.on_message(filters.command("auto") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_auto_upload(c, m):
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document):
         return await m.reply("❌ কোনো ভিডিও বা ডকুমেন্টে রিপ্লাই করে `/auto` দিন।\n(Reply to a video with /auto)")
     
-    title = m.text.replace("/auto", "").strip()
+    await get_db()
+    titles = await titles_col.find().to_list(100)
+    if not titles: 
+        return await m.reply("❌ কোনো টাইটেল সেভ করা নেই! অটো আপলোড করার আগে `/vidtitel <Title>` কমান্ড দিয়ে কিছু টাইটেল অ্যাড করে নিন।")
     
-    if not title:
-        total_files = 0
-        dbs = await get_extra_dbs_async()
-        for d in dbs: 
-            total_files += await d["files"].count_documents({})
-            
-        serial_num = f"{total_files + 1:03d}"
-        random_titles = [
-            f"নিউ ভাইরাল সেক্স ভিডিও {serial_num} / New Viral Sex Video {serial_num}",
-            f"মাল আউট করার সেক্স ভিডিও {serial_num} / Sperm Release Sex Video {serial_num}",
-            f"শব্দ শুনলেই হাত মারতে চাইবে {serial_num} / You will masturbate hearing the sound {serial_num}",
-            f"অসাধারণ সেক্স ভিডিও {serial_num} / Awesome Sex Video {serial_num}",
-            f"গোপন ক্যামেরায় ধারণ করা ভিডিও {serial_num} / Hidden Camera Video {serial_num}"
-        ]
-        title = random.choice(random_titles)
+    btns = [[InlineKeyboardButton(t['title'], callback_data=f"selttl_{t['_id']}")] for t in titles]
+    admin_steps[m.from_user.id] = {"file_id": (m.reply_to_message.video or m.reply_to_message.document).file_id}
+    await m.reply("👇 ভিডিওর জন্য একটি টাইটেল সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
-    msg = await m.reply(f"⏳ অটো প্রসেস ও স্ক্রিনশট গ্রিড তৈরি করা হচ্ছে (এতে কিছুক্ষণ সময় লাগতে পারে)...\n\n**অটো টাইটেল:** {title}")
+@app.on_callback_query(filters.regex(r"^selttl_") & filters.user(ADMIN_ID) & unique_cb)
+async def selttl_cb(c, q):
+    step_data = admin_steps.get(q.from_user.id)
+    if not step_data or "file_id" not in step_data:
+        return await q.answer("❌ সেশন এক্সপায়ার! আবার ভিডিওতে রিপ্লাই করে /auto দিন।", show_alert=True)
+        
+    await get_db()
+    title_doc = await titles_col.find_one({"_id": ObjectId(q.data.split("_")[1])})
+    if not title_doc: return await q.answer("❌ টাইটেলটি পাওয়া যায়নি!", show_alert=True)
+    
+    title = title_doc["title"]
+    msg = await q.message.edit_text(f"⏳ টাইটেল: **{title}**\n\nঅটো প্রসেস ও স্ক্রিনশট গ্রিড তৈরি করা হচ্ছে (এতে কিছুক্ষণ সময় লাগতে পারে)...")
     
     thumb_url = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
-    media = m.reply_to_message.video or m.reply_to_message.document
     
     try:
-        video_path = await c.download_media(media.file_id)
+        video_path = await c.download_media(step_data["file_id"])
         grid_path = f"{video_path}_grid.jpg"
         
         cmd_safe = f'ffmpeg -y -i "{video_path}" -vf "thumbnail=n=20,scale=320:-1,tile=4x2" -frames:v 1 -q:v 2 "{grid_path}"'
-        
         process = await asyncio.create_subprocess_shell(cmd_safe, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await process.communicate()
         
@@ -585,10 +614,10 @@ async def cmd_auto_upload(c, m):
     except Exception as e:
         print("Auto Grid Error:", e)
 
-    admin_steps[m.from_user.id] = {
+    admin_steps[q.from_user.id] = {
         "step": "auto_wait",
         "title": title,
-        "file_id": media.file_id,
+        "file_id": step_data["file_id"],
         "thumb_url": thumb_url
     }
     
@@ -719,7 +748,7 @@ async def cmd_autochannel(c, m):
     await get_db()
     p = m.text.split()
     await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_channel": int(p[1]), "autopost_minute": int(p[2])}})
-    await m.reply(f"✅ Channel Auto Post Configured!\nChat: {p[1]}\nInterval: {p[2]} Min")
+    await m.reply(f"✅ Channel Auto Post Configured!\nChat ID: {p[1]}\nInterval: {p[2]} Min")
 
 @app.on_message(filters.command("setpremcoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_setpremcoin(c, m): 
@@ -729,11 +758,11 @@ async def cmd_setpremcoin(c, m):
 @app.on_message(filters.command("relocktime") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_relocktime(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/relocktime <Minutes>`\nউদাহরণ: `/relocktime 1440` (1440 min = 24 hrs)")
-    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": int(m.text.split()[1])}}); await m.reply("✅ Video Relock Time Set! (টাইম আপডেট করার পর সবার ভিডিও আবার লক করতে /lockall কমান্ড ব্যবহার করতে পারেন)")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": int(m.text.split()[1])}}); await m.reply("✅ Video Relock Time Set!")
 
 @app.on_message(filters.command("delrelocktime") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delrelocktime(c, m): 
-    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); await m.reply("✅ Video Relock Time Deleted! (ভিডিও আর কখনো লক হবেণিক, আজীবন আনলক থাকবে)")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); await m.reply("✅ Video Relock Time Deleted! (ভিডিও আর কখনো লক হবেণিক)")
 
 @app.on_message(filters.command("spincoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_spincoin(c, m): 
@@ -895,15 +924,22 @@ async def cmd_autex(c, m):
     if not tex: return await m.reply("❌ সঠিক নিয়ম: `/autex <Text>`\nউদাহরণ: `/autex নির্দিষ্ট সময় পর ডিলিট হবে।`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autodel_text": tex}}); await m.reply("✅ Auto Delete Text Set!")
 
+# 🛑 USD AND BDT COIN PACKAGE FIX 🛑
 @app.on_message(filters.command("usd") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_usd(c, m): 
-    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/usd <Price> <Days>`\nউদাহরণ: `/usd 5 30`")
-    await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "usd", "details": f"{p[1]} USD={p[2]} Days"}); await m.reply("✅ USD Package Added!")
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/usd <Coins> <Price>`\nউদাহরণ: `/usd 5 30` (5 Coins = 30 USD)")
+    await get_db()
+    p = m.text.split()
+    await pkgs_col.insert_one({"type": "usd", "coins": int(p[1]), "details": f"{p[1]} Coins={p[2]} USD"})
+    await m.reply(f"✅ USD Package Added! ({p[1]} Coins for {p[2]} USD)")
 
 @app.on_message(filters.command("bdt") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_bdt(c, m): 
-    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/bdt <Price> <Days>`\nউদাহরণ: `/bdt 100 30`")
-    await get_db(); p=m.text.split(); await pkgs_col.insert_one({"type": "bkash", "details": f"{p[1]} BDT={p[2]} Days"}); await m.reply("✅ BDT Package Added!")
+    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/bdt <Coins> <Price>`\nউদাহরণ: `/bdt 100 30` (100 Coins = 30 BDT)")
+    await get_db()
+    p = m.text.split()
+    await pkgs_col.insert_one({"type": "bkash", "coins": int(p[1]), "details": f"{p[1]} Coins={p[2]} BDT"})
+    await m.reply(f"✅ BDT Package Added! ({p[1]} Coins for {p[2]} BDT)")
 
 @app.on_message(filters.command("addcred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_addcred(c, m): 
@@ -913,7 +949,6 @@ async def cmd_addcred(c, m):
 @app.on_message(filters.command("delcred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delcred(c, m): 
     await get_db() 
-    # [FIX]: {"type": "coin"} রিমুভ করা হয়েছে যাতে সব প্যাকেজ (BDT, USD, Coin) একসাথে শো করে।
     btns = [[InlineKeyboardButton(f"❌ {p.get('type', '').upper()} | {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in await pkgs_col.find().to_list(100)] 
     await m.reply("প্যাকেজ ডিলিট করতে নিচে ক্লিক করুন / Click to delete:", reply_markup=InlineKeyboardMarkup(btns) if btns else None)
 
@@ -940,21 +975,35 @@ async def cmd_delpremium(c, m):
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/delpremium <UserID>`\nউদাহরণ: `/delpremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(m.text.split()[1])}, {"$set": {"premium_until": None}}); await m.reply("✅ Premium Removed!")
 
+# 🛑 BROADCAST FIX 🛑
 @app.on_message(filters.command("brodcast") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_brodcast(c, m): 
     await get_db() 
-    if not m.reply_to_message: return await m.reply("❌ Reply to a message / কোনো মেসেজে রিপ্লাই করে দিন।") 
-    msg = await m.reply("⏳ Broadcasting..."); success = 0 
+    if not m.reply_to_message: return await m.reply("❌ Reply to a message (text, image, video, button) / কোনো মেসেজে রিপ্লাই করে দিন।") 
+    msg = await m.reply("⏳ Broadcasting to all users..."); success = 0 
     for u in await users_col.find().to_list(None): 
-        try: await m.reply_to_message.copy(u["_id"]); success += 1; await asyncio.sleep(0.05) 
+        try: 
+            await m.reply_to_message.copy(u["_id"], reply_markup=m.reply_to_message.reply_markup)
+            success += 1
+            await asyncio.sleep(0.05) 
         except: pass 
-    await msg.edit_text(f"✅ Sent to {success} users.")
+    await msg.edit_text(f"✅ Sent successfully to {success} users.")
 
 @app.on_message(filters.command("cnlbdcst") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_cnlbdcst(c, m): 
-    if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/cnlbdcst <ChatID>` (রিপ্লাই করে)\nউদাহরণ: `/cnlbdcst -100123456`")
-    if not m.reply_to_message: return await m.reply("❌ Reply to a message / কোনো মেসেজে রিপ্লাই করে দিন।") 
-    await m.reply_to_message.copy(m.text.split()[1]); await m.reply("✅ Message Sent to Channel/Group!")
+    if not m.reply_to_message: return await m.reply("❌ Reply to a message (text, media, button) / কোনো মেসেজে রিপ্লাই করে /cnlbdcst দিন।") 
+    msg = await m.reply("⏳ Broadcasting to all admin channels and groups...")
+    success = 0
+    async for dialog in c.get_dialogs():
+        if dialog.chat.type in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP, enums.ChatType.GROUP]:
+            try:
+                member = await c.get_chat_member(dialog.chat.id, "me")
+                if member.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
+                    await m.reply_to_message.copy(dialog.chat.id, reply_markup=m.reply_to_message.reply_markup)
+                    success += 1
+                    await asyncio.sleep(0.5)
+            except: pass
+    await msg.edit_text(f"✅ Message Broadcasted successfully to {success} Channels/Groups!")
 
 @app.on_message(filters.command("allred") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_allred(c, m): 
@@ -1567,7 +1616,6 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
-    // 🛑 TIMER FIX AND UPDATE
     function updateCountdowns() {
         let now = new Date();
         allFiles.forEach(f => {
@@ -1855,7 +1903,6 @@ HTML_TEMPLATE = """
         }
     }
 
-    // 🛑 AD RESUME TIME FIX (ব্যাক দিলে সময় সেভ হয়ে থাকবে এবং পজ হবে)
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden) {
             handleAppFocus();
