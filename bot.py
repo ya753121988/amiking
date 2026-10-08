@@ -213,7 +213,7 @@ async def background_tasks():
                     if idx >= len(all_files): idx = 0
                     f = all_files[idx]
                     users = await users_col.find().to_list(None)
-                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now / দেখুন", web_app=WebAppInfo(url=f"{WEB_URL}/"))]])
+                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now / দেখুন", web_app=WebAppInfo(url=f"{WEB_URL}/?uid={u['_id']}"))]])
                     for u in users:
                         try:
                             await app.send_photo(u["_id"], photo=get_tg_photo(f.get("thumb_url")), caption=f"🔥 **New Video / নতুন ভিডিও!**\n\nTitle: {f['title']}\n\n👇 Click below to watch / নিচে ক্লিক করে দেখুন!", reply_markup=btn)
