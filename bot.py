@@ -248,6 +248,7 @@ async def cmd_list(c, m):
 `/taskcoin <Coin>` - টাস্ক কমপ্লিট করার কয়েন (ex: /taskcoin 20)
 `/relocktime <Min>` - ভিডিও কতক্ষণ পর আবার লক হবে (ex: /relocktime 1440)
 `/delrelocktime` - ভিডিও আনলক টাইমার ডিলিট করতে (কখনো লক হবে না)
+`/lockall` - সকল ইউজারের আনলক করা ভিডিও রিস্টার্ট/লক করতে।
 
 🔸 **Links & Ads:**
 `/addlink <link>` - ডাইরেক্ট অ্যাড লিংক যোগ করতে
@@ -349,7 +350,6 @@ async def start_cmd(client, message):
 
     if user.get("pending_file"):
         f_id = user["pending_file"]
-        # Double message fix: clear pending file FIRST
         await users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}})
         
         file_data = None
@@ -364,10 +364,17 @@ async def start_cmd(client, message):
             await target_db["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
             msg = await message.reply("⏳ আপনার ফাইল পাঠানো হচ্ছে... / Sending your file...")
             try:
-                sent_msg = await client.send_cached_media(chat_id=uid, file_id=file_data["file_id"], caption=f"🎬 **{file_data['title']}**", protect_content=config.get("frotect", False))
+                # 🛑 অটোলিড টাইমার টেক্সট ক্যাপশনে এড করা হলো
+                del_time = config.get("auto_del_time", 0)
+                caption = f"🎬 **{file_data['title']}**"
+                if del_time > 0:
+                    mins, secs = divmod(del_time, 60)
+                    time_str = f"{mins} মিনিট {secs} সেকেন্ড" if mins > 0 else f"{secs} সেকেন্ড"
+                    caption += f"\n\n⏳ **ভিডিওটি {time_str} পর অটো ডিলিট হয়ে যাবে!**"
+
+                sent_msg = await client.send_cached_media(chat_id=uid, file_id=file_data["file_id"], caption=caption, protect_content=config.get("frotect", False))
                 await msg.delete()
                 
-                del_time = config.get("auto_del_time", 0)
                 if del_time > 0:
                     warn = await client.send_message(uid, f"⚠️ {config.get('autodel_text')}")
                     asyncio.create_task(delete_msg_later(client, uid, sent_msg.id, del_time))
@@ -476,7 +483,6 @@ async def handle_admin_file(c, m):
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
 
-# --- UPDATED AUTO UPLOAD SYSTEM WITH 4x2 GRID (8 PICS) & AUTO CAPTION ---
 @app.on_message(filters.command("auto") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_auto_upload(c, m):
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document):
@@ -484,7 +490,6 @@ async def cmd_auto_upload(c, m):
     
     title = m.text.replace("/auto", "").strip()
     
-    # Auto Title Generate Logic (If title is empty)
     if not title:
         total_files = 0
         dbs = await get_extra_dbs_async()
@@ -492,8 +497,6 @@ async def cmd_auto_upload(c, m):
             total_files += await d["files"].count_documents({})
             
         serial_num = f"{total_files + 1:03d}"
-        
-        # Random captions mapped to your request
         random_titles = [
             f"নিউ ভাইরাল সেক্স ভিডিও {serial_num} / New Viral Sex Video {serial_num}",
             f"মাল আউট করার সেক্স ভিডিও {serial_num} / Sperm Release Sex Video {serial_num}",
@@ -509,24 +512,20 @@ async def cmd_auto_upload(c, m):
     media = m.reply_to_message.video or m.reply_to_message.document
     
     try:
-        # Download video to process via ffmpeg
         video_path = await c.download_media(media.file_id)
         grid_path = f"{video_path}_grid.jpg"
         
-        # FFmpeg command FIXED: Ensures exactly 8 frames (4x2) spread across video
         cmd_safe = f'ffmpeg -y -i "{video_path}" -vf "thumbnail=n=20,scale=320:-1,tile=4x2" -frames:v 1 -q:v 2 "{grid_path}"'
         
         process = await asyncio.create_subprocess_shell(cmd_safe, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await process.communicate()
         
-        # Read the generated grid and encode
         if os.path.exists(grid_path):
             with open(grid_path, "rb") as image_file:
                 encoded = base64.b64encode(image_file.read()).decode('utf-8')
             thumb_url = f"data:image/jpeg;base64,{encoded}"
             os.remove(grid_path)
             
-        # Delete downloaded video to save space
         if os.path.exists(video_path):
             os.remove(video_path)
     except Exception as e:
@@ -654,6 +653,13 @@ async def cmd_mongostats(c, m):
 # ==========================================
 # 6. OTHER ADMIN COMMANDS
 # ==========================================
+@app.on_message(filters.command("lockall") & filters.user(ADMIN_ID) & unique_msg) 
+async def cmd_lockall(c, m): 
+    # 🛑 আনলক টাইমার রিসেট কমান্ড যুক্ত করা হলো 🛑
+    await get_db()
+    await users_col.update_many({}, {"$set": {"unlocked_files": {}}})
+    await m.reply("✅ সবার আনলক করা ভিডিওগুলো রিস্টার্ট/লক করা হয়েছে! / All unlocked videos have been reset/locked for everyone!")
+
 @app.on_message(filters.command("setpremcoin") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_setpremcoin(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/setpremcoin <Coin>`\nউদাহরণ: `/setpremcoin 50`")
@@ -662,7 +668,7 @@ async def cmd_setpremcoin(c, m):
 @app.on_message(filters.command("relocktime") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_relocktime(c, m): 
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/relocktime <Minutes>`\nউদাহরণ: `/relocktime 1440` (1440 min = 24 hrs)")
-    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": int(m.text.split()[1])}}); await m.reply("✅ Video Relock Time Set!")
+    await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": int(m.text.split()[1])}}); await m.reply("✅ Video Relock Time Set! (টাইম আপডেট করার পর সবার ভিডিও আবার লক করতে /lockall কমান্ড ব্যবহার করতে পারেন)")
 
 @app.on_message(filters.command("delrelocktime") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delrelocktime(c, m): 
@@ -933,7 +939,8 @@ def get_ad_api(user_id, file_id):
             ad_link = random.choice(links)["link"]
             wait_time = random.choice(config.get("direk_wait", [5]))
             steps = config.get("regstep", 1)
-            return jsonify({"show_ad": True, "ad_link": ad_link, "wait_time": wait_time, "steps": steps, "requires_coin": False})
+            # 🛑 রেগুলার ভিডিওতেও coin_price পাঠানো হলো যেন পপ আপ দেখানো যায়
+            return jsonify({"show_ad": True, "ad_link": ad_link, "wait_time": wait_time, "steps": steps, "requires_coin": False, "coin_price": config.get("premium_vid_coin", 50)})
             
     return jsonify({"show_ad": False, "is_unlocked": True})
 
@@ -1211,6 +1218,18 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
+<!-- 🛑 NEW REGULAR CHOICE MODAL -->
+<div id="regular-choice-modal" class="modal-overlay">
+    <div class="modal-box">
+        <button class="close-btn" onclick="document.getElementById('regular-choice-modal').style.display='none'">✖</button>
+        <div style="font-size: 40px; margin-bottom:10px;">🎬</div>
+        <h3 style="margin-top:0;">Unlock Video</h3>
+        <p style="color:#aaa; font-size:14px;"><span class="lang-bn">আপনি কিভাবে ভিডিওটি আনলক করতে চান?</span><span class="lang-en">How do you want to unlock?</span></p>
+        <button class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; margin-top:10px;" onclick="document.getElementById('regular-choice-modal').style.display='none'; startAdProcess();">📺 Watch Ad (Free)</button>
+        <button class="btn-main" style="background: linear-gradient(90deg, #c72cff, #ff007f); margin-top:10px;" onclick="document.getElementById('regular-choice-modal').style.display='none'; unlockWithCoin();">💎 Use <span id="reg-coin-price"></span> Coins</button>
+    </div>
+</div>
+
 <div id="ad-overlay" class="modal-overlay">
     <div class="modal-box" style="background: rgba(20,20,30,0.95); border: 2px solid #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.4); border-radius: 20px;">
         <h2 style="color: #00d4ff; margin-top: 0;">🚀 Ad Verification</h2>
@@ -1222,11 +1241,12 @@ HTML_TEMPLATE = """
             <span style="position: absolute; bottom: 15px; font-size: 11px; color: #aaa;">Seconds</span>
         </div>
         <p style="font-size:14px; color:#aaa; margin-bottom: 20px;">
-            <span class="lang-bn">ফাইলটি পেতে সম্পূর্ণ অ্যাডটি দেখুন। ব্যাক দিলে বা কেটে দিলে পুনরায় এখান থেকেই শুরু হবে।</span>
-            <span class="lang-en">Watch the ad completely. Progress is saved if you go back.</span>
+            <span class="lang-bn">ফাইলটি পেতে সম্পূর্ণ অ্যাডটি দেখুন। ব্যাক দিলে টাইম স্টপ হয়ে যাবে।</span>
+            <span class="lang-en">Watch the ad completely. Timer pauses if you go back.</span>
         </p>
         <button id="get-file-btn" class="btn-main" style="background: linear-gradient(90deg, #00d4ff, #00ffcc); color:black; display:none; font-weight: bold; font-size: 18px; padding: 12px;">Next Step</button>
-        <button onclick="document.getElementById('ad-overlay').style.display='none'" style="background: transparent; border: none; color: #777; margin-top: 10px; cursor: pointer; text-decoration: underline;">Hide & Cancel</button>
+        <!-- 🛑 RE-AD BUTTON ADDED HERE -->
+        <button id="re-ad-btn" class="btn-main" style="background: linear-gradient(90deg, #ff0000, #ff7300); color:white; display:none; font-weight: bold; font-size: 18px; padding: 12px; margin-top: 10px;" onclick="resumeAd()">🔄 Re-Ad / আবার অ্যাড দেখুন</button>
     </div>
 </div>
 
@@ -1454,42 +1474,45 @@ HTML_TEMPLATE = """
     }
     loadUser();
 
-    // 🚀 LIVE COUNTDOWN TIMER LOGIC
+    // 🚀 LIVE COUNTDOWN TIMER LOGIC (সব পেজের জন্য ফিক্স করা হয়েছে)
     function updateCountdowns() {
         let now = new Date();
         Object.keys(userUnlockedFiles).forEach(fId => {
-            let el = document.getElementById(`countdown-${fId}`);
-            if (!el) return;
+            let els = document.querySelectorAll(`.countdown-${fId}`);
+            if (els.length === 0) return;
+            
             let expiry = new Date(userUnlockedFiles[fId]);
             let diff = expiry - now;
             
-            if (diff > 0) {
-                if (diff > 315360000000) { // 10 years logic
-                    el.innerHTML = currentLang === 'bn' ? "🔓 আজীবন আনলক" : "🔓 Unlocked Forever";
-                    el.style.display = "block";
-                } else {
-                    let d = Math.floor(diff / 86400000);
-                    let h = Math.floor((diff / 3600000) % 24);
-                    let m = Math.floor((diff / 60000) % 60);
-                    let s = Math.floor((diff / 1000) % 60);
-                    
-                    let y = Math.floor(d / 365); d = d % 365;
-                    let mo = Math.floor(d / 30); d = d % 30;
+            els.forEach(el => {
+                if (diff > 0) {
+                    if (diff > 315360000000) { // 10 years logic
+                        el.innerHTML = currentLang === 'bn' ? "🔓 আজীবন আনলক" : "🔓 Unlocked Forever";
+                        el.style.display = "block";
+                    } else {
+                        let d = Math.floor(diff / 86400000);
+                        let h = Math.floor((diff / 3600000) % 24);
+                        let m = Math.floor((diff / 60000) % 60);
+                        let s = Math.floor((diff / 1000) % 60);
+                        
+                        let y = Math.floor(d / 365); d = d % 365;
+                        let mo = Math.floor(d / 30); d = d % 30;
 
-                    let t = "🔓 ";
-                    if(y>0) t += y + (currentLang==='bn'?"ব ":"y ");
-                    if(mo>0) t += mo + (currentLang==='bn'?"মা ":"mo ");
-                    if(d>0) t += d + (currentLang==='bn'?"দি ":"d ");
-                    if(h>0) t += h + (currentLang==='bn'?"ঘ ":"h ");
-                    if(m>0) t += m + (currentLang==='bn'?"মি ":"m ");
-                    t += s + (currentLang==='bn'?"সে":"s");
-                    
-                    el.innerHTML = t;
-                    el.style.display = "block";
+                        let t = "🔓 ";
+                        if(y>0) t += y + (currentLang==='bn'?"ব ":"y ");
+                        if(mo>0) t += mo + (currentLang==='bn'?"মা ":"mo ");
+                        if(d>0) t += d + (currentLang==='bn'?"দি ":"d ");
+                        if(h>0) t += h + (currentLang==='bn'?"ঘ ":"h ");
+                        if(m>0) t += m + (currentLang==='bn'?"মি ":"m ");
+                        t += s + (currentLang==='bn'?"সে":"s");
+                        
+                        el.innerHTML = t;
+                        el.style.display = "block";
+                    }
+                } else {
+                    el.style.display = "none";
                 }
-            } else {
-                el.style.display = "none";
-            }
+            });
         });
     }
     setInterval(updateCountdowns, 1000);
@@ -1556,7 +1579,7 @@ HTML_TEMPLATE = """
         return `<div class="video-card">
             <img src="${f.thumb_url || 'https://placehold.co/600x400/1c1c24/ff007f?text=Media'}">
             ${tag}
-            <div id="countdown-${f._id}" class="countdown-badge" style="display:none; position:absolute; bottom:60px; right:10px; background:rgba(0,0,0,0.85); border:1px solid #00d4ff; color:#00ffcc; padding:6px 10px; border-radius:8px; font-size:11px; font-weight:bold; z-index:10; box-shadow: 0 0 10px rgba(0,212,255,0.3);"></div>
+            <div class="countdown-badge countdown-${f._id}" style="display:none; position:absolute; bottom:60px; right:10px; background:rgba(0,0,0,0.85); border:1px solid #00d4ff; color:#00ffcc; padding:6px 10px; border-radius:8px; font-size:11px; font-weight:bold; z-index:10; box-shadow: 0 0 10px rgba(0,212,255,0.3);"></div>
             <div class="play-btn-overlay" onclick="playVideo('${f._id}')"></div>
             <div class="video-info">
                 <b style="font-size:15px; display:block; margin-bottom:5px;">${f.title} <small style="color:#00d4ff;">[ID: ${f._id}]</small></b>
@@ -1652,6 +1675,8 @@ HTML_TEMPLATE = """
     let currentDeepLink = "";
     let adDataGlobal = null;
     let timerInterval = null;
+    let isAdRunning = false;
+    let adLinkGlobal = "";
     let cFileId = null;
 
     async function playVideo(fileId) {
@@ -1672,7 +1697,9 @@ HTML_TEMPLATE = """
             document.getElementById('coin-unlock-price-en').innerText = adDataGlobal.coin_price;
             document.getElementById('coin-unlock-modal').style.display = 'flex';
         } else if (adDataGlobal.show_ad) { 
-            startAdProcess(); 
+            // 🛑 Regular Video Choice Popup
+            document.getElementById('reg-coin-price').innerText = adDataGlobal.coin_price || 30;
+            document.getElementById('regular-choice-modal').style.display = 'flex';
         } else { 
             openTgLink(currentDeepLink); setTimeout(() => {if(tg && tg.close) tg.close();}, 500); 
         }
@@ -1699,11 +1726,25 @@ HTML_TEMPLATE = """
         }
     }
 
-    // 🚀 RESUME PROGRESS AD SYSTEM
+    // 🛑 STOP TIMER IF USER COMES BACK EARLY
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && isAdRunning) {
+            let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
+            if (adState && adState.timeLeft > 0) {
+                isAdRunning = false;
+                document.getElementById('timer-count').style.color = 'red';
+                document.getElementById('re-ad-btn').style.display = 'block';
+            }
+        }
+    });
+
+    // 🚀 RESUME PROGRESS AD SYSTEM (PAUSE AND RE-AD ADDED)
     function startAdProcess() {
         document.getElementById('ad-overlay').style.display = 'flex';
         document.getElementById('get-file-btn').style.display = 'none';
+        document.getElementById('re-ad-btn').style.display = 'none';
         document.getElementById('timer-count').style.display = 'block';
+        document.getElementById('timer-count').style.color = '#f02d73';
 
         let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId));
         if (!adState) {
@@ -1712,43 +1753,59 @@ HTML_TEMPLATE = """
         
         document.getElementById('step-info').innerHTML = `🔹 <b>Step ${adState.step}</b> / ${adDataGlobal.steps}`;
         document.getElementById('timer-count').innerText = adState.timeLeft;
-        window.open(adDataGlobal.ad_link, '_blank');
+        adLinkGlobal = adDataGlobal.ad_link;
+        
+        resumeAd();
+    }
+
+    function resumeAd() {
+        isAdRunning = true;
+        document.getElementById('re-ad-btn').style.display = 'none';
+        document.getElementById('timer-count').style.color = '#f02d73';
+        window.open(adLinkGlobal, '_blank');
 
         clearInterval(timerInterval);
+        let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
+
         timerInterval = setInterval(() => {
-            adState.timeLeft--;
-            if (adState.timeLeft <= 0) {
-                clearInterval(timerInterval);
-                document.getElementById('timer-count').style.display = 'none';
-                
-                if (adState.step < adDataGlobal.steps) {
-                    let btn = document.getElementById('get-file-btn');
-                    btn.innerText = "Next Step";
-                    btn.style.display = 'block';
-                    btn.onclick = () => {
-                        adState.step++; adState.timeLeft = adDataGlobal.wait_time;
-                        localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
-                        startAdProcess();
-                    };
-                } else {
-                    let btn = document.getElementById('get-file-btn');
-                    btn.innerText = currentLang === 'bn' ? "ফাইল নিন (Get File)" : "Get File Now";
-                    btn.style.display = 'block';
-                    btn.onclick = async () => {
-                        localStorage.removeItem('ad_state_' + cFileId);
-                        await fetch('/api/unlock_file', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({uid: userId, file_id: cFileId, method: "ad"})
-                        });
-                        loadUser();
-                        openTgLink(currentDeepLink); 
-                        setTimeout(()=>{ if(tg && tg.close) tg.close(); }, 500);
-                    };
-                }
-            } else {
-                document.getElementById('timer-count').innerText = adState.timeLeft;
+            if (isAdRunning) {
+                adState.timeLeft--;
                 localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
+                
+                if (adState.timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    isAdRunning = false;
+                    document.getElementById('timer-count').style.display = 'none';
+                    
+                    if (adState.step < adDataGlobal.steps) {
+                        let btn = document.getElementById('get-file-btn');
+                        btn.innerText = "Next Step";
+                        btn.style.display = 'block';
+                        btn.onclick = () => {
+                            adState.step++; adState.timeLeft = adDataGlobal.wait_time;
+                            localStorage.setItem('ad_state_' + cFileId, JSON.stringify(adState));
+                            startAdProcess();
+                        };
+                    } else {
+                        let btn = document.getElementById('get-file-btn');
+                        btn.innerText = currentLang === 'bn' ? "ফাইল নিন (Get File)" : "Get File Now";
+                        btn.style.display = 'block';
+                        btn.onclick = async () => {
+                            localStorage.removeItem('ad_state_' + cFileId);
+                            await fetch('/api/unlock_file', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({uid: userId, file_id: cFileId, method: "ad"})
+                            });
+                            loadUser();
+                            document.getElementById('ad-overlay').style.display = 'none';
+                            openTgLink(currentDeepLink); 
+                            setTimeout(()=>{ if(tg && tg.close) tg.close(); }, 500);
+                        };
+                    }
+                } else {
+                    document.getElementById('timer-count').innerText = adState.timeLeft;
+                }
             }
         }, 1000);
     }
@@ -1800,6 +1857,7 @@ HTML_TEMPLATE = """
         document.getElementById('timer-count').innerText = timeLeft;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
+        document.getElementById('re-ad-btn').style.display = 'none';
         
         window.open(data.ad_link, '_blank');
         
@@ -1836,6 +1894,7 @@ HTML_TEMPLATE = """
         document.getElementById('timer-count').innerText = timeLeft;
         document.getElementById('timer-count').style.display = 'block';
         document.getElementById('get-file-btn').style.display = 'none';
+        document.getElementById('re-ad-btn').style.display = 'none';
         
         window.open(link, '_blank');
         
