@@ -845,10 +845,29 @@ async def cmd_dellink(c, m):
 async def dellink_cb(c, q): 
     await get_db(); await links_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ Ad Link Deleted!")
 
-@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID) & unique_msg) 
-async def cmd_addcnl(c, m): 
-    if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/addcnl <Name> <Link>`\nউদাহরণ: `/addcnl MyChannel https://t.me/...`")
-    await get_db(); p = m.text.split(maxsplit=2); await channels_col.insert_one({"type": "inline", "name": p[1], "link": p[2]}); await m.reply("✅ Inline Channel added!")
+@app.on_message(filters.command("addcnl") & filters.user(ADMIN_ID))
+async def cmd_addcnl(c, m):
+    try:
+        text = m.text.split(None, 1)
+        if len(text) < 2:
+            return await m.reply("❌ সঠিক নিয়ম: `/addcnl <Name> <Link>`\nউদাহরণ: `/addcnl Backup Channel https://t.me/...`")
+        
+        args = text[1].rsplit(None, 1)
+        if len(args) < 2:
+            return await m.reply("❌ সঠিক নিয়ম: চ্যানেলের নামের পর অবশ্যই লিংক দিন।")
+            
+        name = args[0]  # এখানে স্পেসসহ পুরো নাম থাকবে (যেমন: Backup Channel)
+        link = args[1]  # এখানে লিংক আলাদা হয়ে যাবে
+        
+        await get_db()
+        await channels_col.update_one(
+            {"link": link},
+            {"$set": {"name": name, "link": link, "type": "inline"}},
+            upsert=True
+        )
+        await m.reply(f"✅ সফলভাবে ইনলাইন চ্যানেল যোগ করা হয়েছে!\n\n📌 **নাম:** {name}\n🔗 **লিংক:** {link}")
+    except Exception as e:
+        await m.reply(f"❌ ত্রুটি ঘটেছে: {e}")
 
 @app.on_message(filters.command("delcnl") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_delcnl(c, m): 
