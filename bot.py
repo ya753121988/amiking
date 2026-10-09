@@ -249,9 +249,7 @@ async def background_tasks():
                     if c_idx >= len(all_files): c_idx = 0
                     f = all_files[c_idx]
                     btn = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🎬 Watch Now / দেখুন", url=f"https://t.me/{BOT_USERNAME}?start=file_{f['_id']}")],
-                        [InlineKeyboardButton("🔥 Open App / অ্যাপ ওপেন করুন", url=f"https://t.me/{BOT_USERNAME}")]
-                    ])
+                        [InlineKeyboardButton("🎬 Watch Now / দেখুন", url=f"https://t.me/{BOT_USERNAME}?start=home")])
                     try:
                         await app.send_photo(
                             int(ch_id),
