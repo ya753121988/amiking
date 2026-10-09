@@ -177,10 +177,7 @@ def get_tg_photo(thumb):
 async def notify_new_post(client, file_doc, config):
     ch_id = config.get("autopost_channel")
     if ch_id:
-        btn = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 Watch Now / দেখুন", url=f"https://t.me/{BOT_USERNAME}?start=file_{file_doc['_id']}")],
-            [InlineKeyboardButton("🔥 Open App / অ্যাপ ওপেন করুন", url=f"https://t.me/{BOT_USERNAME}")]
-        ])
+        btn = [InlineKeyboardButton("🎬 Watch Now / দেখুন", url=f"https://t.me/{BOT_USERNAME}?start=home")])
         try:
             await client.send_photo(
                 int(ch_id),
