@@ -18,7 +18,7 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 from pyrogram import Client, filters, idle, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp 
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp, BotCommand 
 from pyrogram.errors import UserNotParticipant, FloodWait 
 from flask import Flask, render_template_string, jsonify, request 
 from motor.motor_asyncio import AsyncIOMotorClient 
@@ -161,6 +161,36 @@ def get_extra_dbs_sync():
     except: pass
     return dbs
 
+# 🛑 Base64 কনভার্টার (টেলিগ্রামে ছবি পাঠানোর জন্য)
+def get_tg_photo(thumb):
+    if not thumb: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+    if thumb.startswith("data:image"):
+        try:
+            b64 = thumb.split(",")[1]
+            img = io.BytesIO(base64.b64decode(b64))
+            img.name = "thumb.jpg"
+            return img
+        except: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+    return thumb
+
+# 🛑 নতুন অ্যাড করা পোস্ট সাথে সাথে চ্যানেলে পাঠানোর ফাংশন
+async def notify_new_post(client, file_doc, config):
+    ch_id = config.get("autopost_channel")
+    if ch_id:
+        btn = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Watch Now / দেখুন", url=f"https://t.me/{BOT_USERNAME}?start=file_{file_doc['_id']}")],
+            [InlineKeyboardButton("🔥 Open App / অ্যাপ ওপেন করুন", url=f"https://t.me/{BOT_USERNAME}")]
+        ])
+        try:
+            await client.send_photo(
+                int(ch_id),
+                photo=get_tg_photo(file_doc.get("thumb_url")),
+                caption=f"🔥 **New Trending Video!**\n\n🎬 **{file_doc['title']}**\n\n👇 নিচের লিংকে বা বাটনে ক্লিক করে সম্পূর্ণ ভিডিও দেখুন!",
+                reply_markup=btn
+            )
+        except Exception as e:
+            print(f"Channel Autopost New Post Error: {e}")
+
 # ==========================================
 # 3. BACKGROUND TASKS
 # ==========================================
@@ -168,18 +198,6 @@ async def background_tasks():
     last_autovid = time.time()
     last_autopost = time.time() 
     last_channel_post = time.time() 
-    
-    # 🛑 Base64 কনভার্টার (টেলিগ্রামে ছবি পাঠানোর জন্য)
-    def get_tg_photo(thumb):
-        if not thumb: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
-        if thumb.startswith("data:image"):
-            try:
-                b64 = thumb.split(",")[1]
-                img = io.BytesIO(base64.b64decode(b64))
-                img.name = "thumb.jpg"
-                return img
-            except: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
-        return thumb
 
     while True: 
         await asyncio.sleep(60) 
@@ -235,7 +253,7 @@ async def background_tasks():
                     f = all_files[c_idx]
                     btn = InlineKeyboardMarkup([
                         [InlineKeyboardButton("🎬 Watch Now / দেখুন", url=f"https://t.me/{BOT_USERNAME}?start=file_{f['_id']}")],
-                        [InlineKeyboardButton("🔥 Open App / অ্যাপ ওপেন করুন", web_app=WebAppInfo(url=f"{WEB_URL}/"))]
+                        [InlineKeyboardButton("🔥 Open App / অ্যাপ ওপেন করুন", url=f"https://t.me/{BOT_USERNAME}")]
                     ])
                     try:
                         await app.send_photo(
@@ -260,65 +278,77 @@ async def cmd_myid(c, m):
 @app.on_message(filters.command("cmd") & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_list(c, m):
     text = """
-    🛠 **সকল কমান্ড লিস্ট / All Commands List:**
+🛠 **সকল কমান্ড লিস্ট / All Commands List:**
 
 🔸 **Basic Commands:**
-`/myid` - আইডি দেখতে
-`/stats` - ইউজারের সংখ্যা ও স্ট্যাটিস্টিকস
-`/name <Name>` - ওয়েবসাইটের নাম পরিবর্তন
+/start - বট রিস্টার্ট করুন
+/myid - আইডি দেখতে
+/cmd - সকল কমান্ড লিস্ট
+/stats - ইউজারের স্ট্যাটিস্টিকস
+/name - ওয়েবসাইটের নাম পরিবর্তন
 
 🔸 **File Management:**
-`/addfile` - ম্যানুয়ালি ফাইল যোগ করুন
-`/vidtitel <Title>` - অটো ভিডিওর জন্য টাইটেল অ্যাড করতে 
-`/deltitel` - সেভ করা টাইটেল ডিলিট করতে
-`/auto` - ভিডিওতে রিপ্লাই করে অটো ফাইল + 4x2 (৮ পিক) থাম্বনেইল গ্রিড তৈরি (লিস্ট থেকে সিলেক্ট করে)
-`/delfile <file_id>` - ফাইল ডিলিট করতে
-`/delall` - সকল ডাটাবেসের সব ফাইল ডিলিট করতে
+/addfile - ম্যানুয়ালি ফাইল যোগ করুন
+/vidtitel - অটো ভিডিও টাইটেল অ্যাড
+/deltitel - সেভ করা টাইটেল ডিলিট
+/auto - অটো ফাইল + থাম্বনেইল
+/delfile - ফাইল ডিলিট
+/delall - সব ডাটাবেসের সব ফাইল ডিলিট
 
 🔸 **Tasks & Spin limits:**
-`/spinlimit <Num>` - ডেইলি স্পিন লিমিট
-`/tasklimit <Num>` - ডেইলি ডিফল্ট টাস্ক লিমিট
-`/addtask <Title> | <Link> | <Coin>` - নতুন কাস্টম আনলিমিটেড টাস্ক অ্যাড
-`/deltask` - কাস্টম টাস্ক ডিলিট করতে
+/spinlimit - ডেইলি স্পিন লিমিট
+/tasklimit - ডেইলি টাস্ক লিমিট
+/addtask - কাস্টম আনলিমিটেড টাস্ক অ্যাড
+/deltask - কাস্টম টাস্ক ডিলিট
 
 🔸 **Database (MongoDB) Manager:**
-`/mongo <uri>` - নতুন ডাটাবেস যোগ করতে
-`/delmongo` - এক্সট্রা ডাটাবেস রিমুভ করতে
-`/mongostats` - ডাটাবেস স্টোরেজ চেক করতে
+/mongo - নতুন ডাটাবেস যোগ
+/delmongo - এক্সট্রা ডাটাবেস রিমুভ
+/mongostats - ডাটাবেস স্টোরেজ চেক
 
 🔸 **Coins & Pricing:**
-`/setpremcoin <Coin>` - প্রিমিয়াম ভিডিওর দাম
-`/spincoin <Min-Max>` - স্পিন কয়েনের রেঞ্জ
-`/taskcoin <Coin>` - টাস্ক কমপ্লিট করার কয়েন
-`/relocktime <Min>` - ভিডিও কতক্ষণ পর আবার লক হবে
-`/delrelocktime` - ভিডিও আনলক টাইমার ডিলিট করতে
-`/lockall` - সকল ইউজারের আনলক করা ভিডিও রিস্টার্ট/লক করতে।
+/setpremcoin - প্রিমিয়াম ভিডিওর দাম
+/spincoin - স্পিন কয়েনের রেঞ্জ
+/taskcoin - টাস্ক কমপ্লিট করার কয়েন
+/relocktime - ভিডিও আনলক টাইমার
+/delrelocktime - আনলক টাইমার ডিলিট
+/lockall - আনলক করা ভিডিও রিস্টার্ট
 
 🔸 **Links & Ads:**
-`/addlink <link>` - ডাইরেক্ট অ্যাড লিংক যোগ করতে
-`/delink` - অ্যাড লিংক রিমুভ করতে
-`/prstep <step>` - প্রিমিয়াম অ্যাড স্টেপ সেট করতে
-`/regstep <step>` - রেগুলার অ্যাড স্টেপ সেট করতে
+/addlink - ডাইরেক্ট অ্যাড লিংক যোগ
+/delink - অ্যাড লিংক রিমুভ
+/prstep - প্রিমিয়াম অ্যাড স্টেপ
+/regstep - রেগুলার অ্যাড স্টেপ
 
 🔸 **Channels & Broadcast:**
-`/addcnl <Name> <Link>` - ইনলাইন চ্যানেল লিংক অ্যাড করতে
-`/vercnl <ChatID> <Link>` - Must Join (Force Sub) চ্যানেল অ্যাড করতে
-`/brodcast` - সকল ইউজারকে মেসেজ পাঠাতে (বাটন/ফাইল/ছবিতে রিপ্লাই করে)
-`/cnlbdcst` - বটের সকল এডমিন চ্যানেলে/গ্রুপে একসাথে মেসেজ পাঠাতে (রিপ্লাই করে)
-`/autochannel <ChatID> <Min>` - নির্দিষ্ট চ্যানেলে অটোমেটিক ভিডিও পোস্ট
+/addcnl - ইনলাইন চ্যানেল অ্যাড
+/vercnl - Must Join চ্যানেল অ্যাড
+/delcnl - ইনলাইন চ্যানেল ডিলিট
+/delvrcnl - Must Join চ্যানেল ডিলিট
+/brodcast - ইউজারদের মেসেজ পাঠান
+/cnlbdcst - চ্যানেল/গ্রুপে মেসেজ পাঠান
+/autochannel - চ্যানেলে অটোমেটিক ভিডিও পোস্ট
 
 🔸 **Coupons & Packages:**
-`/allred <Limit> <Min-Max>` - অটো রেন্ডম কুপন তৈরি করতে
-`/addcred <Coins> = <Amt> <Unit>` - কয়েন প্যাকেজ তৈরি (ex: /addcred 500 = 7 d)
-`/bdt <Coins> <Price>` - বিকাশ প্যাকেজ তৈরি (ex: /bdt 100 30)
-`/usd <Coins> <Price>` - USD প্যাকেজ তৈরি (ex: /usd 5 30)
-`/delcred` - যেকোনো প্যাকেজ ডিলিট করতে
+/allred - অটো রেন্ডম কুপন তৈরি
+/addcred - কয়েন প্যাকেজ তৈরি
+/bdt - বিকাশ প্যাকেজ তৈরি
+/usd - USD প্যাকেজ তৈরি
+/delcred - যেকোনো প্যাকেজ ডিলিট
 
 🔸 **Auto Delete & Others:**
-`/autodel <sec>` - ভিডিও অটো ডিলিট টাইম
-`/frotect <on/off>` - মেসেজ ফরওয়ার্ড/সেভ অফ করতে
-`/addadmin <username>` - পেমেন্ট অ্যাডমিন সেট করতে
-    """
+/autodel - ভিডিও অটো ডিলিট টাইম
+/frotect - ফরওয়ার্ড/সেভ অফ করতে
+/addadmin - পেমেন্ট অ্যাডমিন সেট
+/addtex - স্টার্ট টেক্সট সেট করতে
+/deltex - স্টার্ট টেক্সট ডিলিট করতে
+/logo - স্টার্ট লোগো সেট করতে
+/autvid - অটো ভিডিও মেসেজ সেট করতে
+/autvidti - অটো ভিডিও ইন্টারভাল সেট
+/autpost - অটো পোস্ট ইন্টারভাল সেট
+/refbonous - রেফার বোনাস সেট করতে
+/refbonousoff - রেফার বোনাস অফ করতে
+"""
     await m.reply(text)
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_ID) & unique_msg) 
@@ -439,7 +469,6 @@ async def start_cmd(client, message):
     if config.get("start_text"): txt += f"\n📝 {config.get('start_text')}\n"
     txt += "\n👇 নিচের বাটন থেকে অ্যাপ ওপেন করুন / Click below to open app:"
 
-    # 🛑 নিরাপদ বাটন জেনারেশন (ভুল এড়াতে ট্রাই-ক্যাচ ও ভ্যালিডেশন সহ)
     btns = []
     try:
         async for ch in channels_col.find({"type": "inline"}):
@@ -541,8 +570,12 @@ async def handle_admin_file(c, m):
                 target_db = d
         except: pass
 
-    await target_db["files"].insert_one({ "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": [], "comments": [] }) 
+    new_file = { "_id": short_id, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": f_id, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "views": 0, "likes": [], "comments": [] }
+    await target_db["files"].insert_one(new_file) 
     del admin_steps[m.from_user.id] 
+    
+    config = await get_config()
+    await notify_new_post(c, new_file, config)
     
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await msg.edit_text(f"✅ ফাইল সফলভাবে অ্যাড হয়েছে! / File Added Successfully!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
@@ -652,12 +685,16 @@ async def auto_type_cb(c, q):
                 target_db = d
         except: pass
         
-    await target_db["files"].insert_one({
+    new_file = {
         "_id": short_id, "title": step_data["title"], "category": "All",
         "is_premium": is_premium, "file_id": step_data["file_id"],
         "thumb_url": step_data["thumb_url"], "views": 0, "likes": [], "comments": []
-    })
+    }
+    await target_db["files"].insert_one(new_file)
     del admin_steps[q.from_user.id]
+    
+    config = await get_config()
+    await notify_new_post(c, new_file, config)
     
     db_name = "Main DB" if target_db == dbs[0] else "Extra DB"
     await q.message.edit_text(f"✅ অটো আপলোড সফল! / Auto Upload Success!\nID: `{short_id}`\n🗄 Saved in: {db_name}")
@@ -950,7 +987,6 @@ async def cmd_autex(c, m):
     if not tex: return await m.reply("❌ সঠিক নিয়ম: `/autex <Text>`\nউদাহরণ: `/autex নির্দিষ্ট সময় পর ডিলিট হবে।`")
     await get_db(); await config_col.update_one({"_id": "settings"}, {"$set": {"autodel_text": tex}}); await m.reply("✅ Auto Delete Text Set!")
 
-# 🛑 USD AND BDT COIN PACKAGE FIX 🛑
 @app.on_message(filters.command("usd") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_usd(c, m): 
     if len(m.text.split()) < 3: return await m.reply("❌ সঠিক নিয়ম: `/usd <Coins> <Price>`\nউদাহরণ: `/usd 5 30` (5 Coins = 30 USD)")
@@ -1001,7 +1037,6 @@ async def cmd_delpremium(c, m):
     if len(m.text.split()) < 2: return await m.reply("❌ সঠিক নিয়ম: `/delpremium <UserID>`\nউদাহরণ: `/delpremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(m.text.split()[1])}, {"$set": {"premium_until": None}}); await m.reply("✅ Premium Removed!")
 
-# 🛑 BROADCAST FIX 🛑
 @app.on_message(filters.command("brodcast") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_brodcast(c, m): 
     await get_db() 
@@ -1018,17 +1053,37 @@ async def cmd_brodcast(c, m):
 @app.on_message(filters.command("cnlbdcst") & filters.user(ADMIN_ID) & unique_msg) 
 async def cmd_cnlbdcst(c, m): 
     if not m.reply_to_message: return await m.reply("❌ Reply to a message (text, media, button) / কোনো মেসেজে রিপ্লাই করে /cnlbdcst দিন।") 
-    msg = await m.reply("⏳ Broadcasting to all admin channels and groups...")
+    msg = await m.reply("⏳ Broadcasting to channels/groups...")
     success = 0
-    async for dialog in c.get_dialogs():
-        if dialog.chat.type in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP, enums.ChatType.GROUP]:
-            try:
-                member = await c.get_chat_member(dialog.chat.id, "me")
-                if member.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
-                    await m.reply_to_message.copy(dialog.chat.id, reply_markup=m.reply_to_message.reply_markup)
-                    success += 1
-                    await asyncio.sleep(0.5)
-            except: pass
+    await get_db()
+    config = await get_config()
+    
+    # সংগৃহীত সকল চ্যানেল/গ্রুপ এর আইডি সেট
+    ch_set = set()
+    if config.get("autopost_channel"): ch_set.add(config["autopost_channel"])
+    async for ch in channels_col.find({"type": "must_join"}): ch_set.add(ch["chat_id"])
+    
+    # ডাটাবেসে থাকা চ্যানেলগুলোতে পাঠানো
+    for ch_id in ch_set:
+        try:
+            await m.reply_to_message.copy(ch_id, reply_markup=m.reply_to_message.reply_markup)
+            success += 1
+            await asyncio.sleep(0.5)
+        except: pass
+        
+    # ডায়ালগ লিস্ট থেকে পাওয়া এডমিন থাকা অন্য চ্যানেলগুলোতেও পাঠানো
+    try:
+        async for dialog in c.get_dialogs():
+            if dialog.chat.type in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP, enums.ChatType.GROUP]:
+                if dialog.chat.id not in ch_set:
+                    try:
+                        await m.reply_to_message.copy(dialog.chat.id, reply_markup=m.reply_to_message.reply_markup)
+                        success += 1
+                        ch_set.add(dialog.chat.id)
+                        await asyncio.sleep(0.5)
+                    except: pass
+    except Exception as e: print("Dialogs error:", e)
+    
     await msg.edit_text(f"✅ Message Broadcasted successfully to {success} Channels/Groups!")
 
 @app.on_message(filters.command("allred") & filters.user(ADMIN_ID) & unique_msg) 
@@ -1929,16 +1984,7 @@ HTML_TEMPLATE = """
         }
     }
 
-    document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) {
-            handleAppFocus();
-        }
-    });
-
-    window.addEventListener("focus", () => {
-        handleAppFocus();
-    });
-
+    // 🛑 Enhanced Focus/Pause Logic for Ad tracking (Works globally everywhere)
     function handleAppFocus() {
         if (isAdRunning) {
             let timerElement = document.getElementById('timer-count');
@@ -1962,6 +2008,31 @@ HTML_TEMPLATE = """
                 };
             }
         }
+    }
+
+    function triggerPause() {
+        if (isAdRunning) handleAppFocus();
+    }
+
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) triggerPause();
+    });
+    window.addEventListener("focus", triggerPause);
+
+    // 🛑 This ensures if they are on the page actively, the ad WILL NOT run!
+    function startFocusChecker() {
+        setTimeout(() => {
+            let focusCheck = setInterval(() => {
+                if (!isAdRunning) {
+                    clearInterval(focusCheck);
+                    return;
+                }
+                if (document.visibilityState === 'visible' && document.hasFocus()) {
+                    triggerPause();
+                    clearInterval(focusCheck);
+                }
+            }, 500);
+        }, 2000); // 2 সেকেন্ড সময় দেওয়া হলো অন্য লিংকে যাওয়ার জন্য
     }
 
     function startAdProcess() {
@@ -2005,6 +2076,8 @@ HTML_TEMPLATE = """
         } else {
             window.open(adLinkGlobal, '_blank');
         }
+
+        startFocusChecker();
 
         clearInterval(timerInterval); 
         let adState = JSON.parse(localStorage.getItem('ad_state_' + cFileId)) || { step: 1, timeLeft: adDataGlobal.wait_time };
@@ -2152,6 +2225,8 @@ HTML_TEMPLATE = """
             window.open(earnLinkGlobal, '_blank');
         }
         
+        startFocusChecker();
+        
         clearInterval(timerInterval);
         timerInterval = setInterval(() => {
             if (isAdRunning) {
@@ -2242,25 +2317,83 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     web.run(host="0.0.0.0", port=port, debug=False)
 
-async def main_bot(): 
+async def main_bot():
+    global BOT_USERNAME
     await get_db() 
     await get_config() 
-    await app.start() 
-    print("✅ Bot Started Successfully!") 
+    await app.start()
+    
+    BOT_USERNAME = app.me.username
+    print(f"✅ Bot Started Successfully! (@{BOT_USERNAME})") 
     
     # ==========================================
-    # 🛑 MINI APP AUTO SETUP (মেনু বাটন অটো সেট)
+    # 🛑 COMMAND MENU & MINI APP AUTO SETUP
     # ==========================================
     try:
+        commands = [
+            BotCommand("start", "বট স্টার্ট করুন"),
+            BotCommand("myid", "আপনার আইডি দেখুন"),
+            BotCommand("cmd", "সকল কমান্ড লিস্ট (Admin)"),
+            BotCommand("stats", "ইউজারের স্ট্যাটিস্টিকস (Admin)"),
+            BotCommand("name", "ওয়েবসাইটের নাম পরিবর্তন (Admin)"),
+            BotCommand("addfile", "ম্যানুয়ালি ফাইল যোগ (Admin)"),
+            BotCommand("vidtitel", "অটো ভিডিও টাইটেল অ্যাড (Admin)"),
+            BotCommand("deltitel", "টাইটেল ডিলিট (Admin)"),
+            BotCommand("auto", "অটো ফাইল + থাম্বনেইল (Admin)"),
+            BotCommand("delfile", "ফাইল ডিলিট (Admin)"),
+            BotCommand("delall", "সব ফাইল ডিলিট (Admin)"),
+            BotCommand("spinlimit", "ডেইলি স্পিন লিমিট (Admin)"),
+            BotCommand("tasklimit", "ডেইলি টাস্ক লিমিট (Admin)"),
+            BotCommand("addtask", "কাস্টম টাস্ক অ্যাড (Admin)"),
+            BotCommand("deltask", "কাস্টম টাস্ক ডিলিট (Admin)"),
+            BotCommand("mongo", "নতুন ডাটাবেস যোগ (Admin)"),
+            BotCommand("delmongo", "এক্সট্রা ডাটাবেস রিমুভ (Admin)"),
+            BotCommand("mongostats", "ডাটাবেস স্টোরেজ চেক (Admin)"),
+            BotCommand("setpremcoin", "প্রিমিয়াম ভিডিওর দাম (Admin)"),
+            BotCommand("spincoin", "স্পিন রেঞ্জ (Admin)"),
+            BotCommand("taskcoin", "টাস্ক কয়েন (Admin)"),
+            BotCommand("relocktime", "ভিডিও আনলক টাইমার (Admin)"),
+            BotCommand("delrelocktime", "টাইমার ডিলিট (Admin)"),
+            BotCommand("lockall", "সবার আনলক ভিডিও লক (Admin)"),
+            BotCommand("addlink", "ডাইরেক্ট লিংক যোগ (Admin)"),
+            BotCommand("delink", "লিংক রিমুভ (Admin)"),
+            BotCommand("prstep", "প্রিমিয়াম স্টেপ (Admin)"),
+            BotCommand("regstep", "রেগুলার স্টেপ (Admin)"),
+            BotCommand("addcnl", "ইনলাইন চ্যানেল অ্যাড (Admin)"),
+            BotCommand("vercnl", "ফোর্স সাব চ্যানেল অ্যাড (Admin)"),
+            BotCommand("delcnl", "ইনলাইন চ্যানেল ডিলিট (Admin)"),
+            BotCommand("delvrcnl", "ফোর্স সাব চ্যানেল ডিলিট (Admin)"),
+            BotCommand("brodcast", "ইউজারদের মেসেজ (Admin)"),
+            BotCommand("cnlbdcst", "চ্যানেল/গ্রুপ মেসেজ (Admin)"),
+            BotCommand("autochannel", "অটো ভিডিও পোস্ট (Admin)"),
+            BotCommand("allred", "রেন্ডম কুপন তৈরি (Admin)"),
+            BotCommand("addcred", "কয়েন প্যাকেজ তৈরি (Admin)"),
+            BotCommand("bdt", "বিকাশ প্যাকেজ তৈরি (Admin)"),
+            BotCommand("usd", "USD প্যাকেজ তৈরি (Admin)"),
+            BotCommand("delcred", "প্যাকেজ ডিলিট (Admin)"),
+            BotCommand("autodel", "অটো ডিলিট টাইম (Admin)"),
+            BotCommand("frotect", "ফরওয়ার্ড অফ (Admin)"),
+            BotCommand("addadmin", "পেমেন্ট অ্যাডমিন সেট (Admin)"),
+            BotCommand("addtex", "স্টার্ট টেক্সট সেট (Admin)"),
+            BotCommand("deltex", "স্টার্ট টেক্সট ডিলিট (Admin)"),
+            BotCommand("logo", "স্টার্ট লোগো সেট (Admin)"),
+            BotCommand("autvid", "অটো ভিডিও মেসেজ (Admin)"),
+            BotCommand("autvidti", "অটো ভিডিও ইন্টারভাল (Admin)"),
+            BotCommand("autpost", "অটো পোস্ট ইন্টারভাল (Admin)"),
+            BotCommand("refbonous", "রেফার বোনাস সেট (Admin)"),
+            BotCommand("refbonousoff", "রেফার বোনাস অফ (Admin)"),
+        ]
+        await app.set_bot_commands(commands)
+        
         await app.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="🔥 Open App",
                 web_app=WebAppInfo(url=WEB_URL)
             )
         )
-        print("✅ Mini App Menu Button Auto Setup Successful!")
+        print("✅ Commands and Menu Setup Successful!")
     except Exception as e:
-        print(f"⚠️ Mini App Auto Setup Error: {e}")
+        print(f"⚠️ Setup Error: {e}")
 
     asyncio.create_task(background_tasks()) 
     await idle() 
